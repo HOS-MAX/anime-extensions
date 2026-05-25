@@ -1,0 +1,37 @@
+name: Build Single Aniyomi Extension
+
+on:
+  push:
+    branches:
+      - master   # Matches your 'master' branch from the screenshot
+      - main
+  workflow_dispatch: # Allows manual building via GitHub UI
+
+jobs:
+  build:
+    name: Compile anime3rb Extension
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Grant Execute Permission to Gradlew
+        run: chmod +x ./gradlew
+
+      # This target tells Gradle to ONLY build the anime3rb submodule
+      - name: Build anime3rb APK Only
+        run: ./gradlew :src:ar:anime3rb:assembleRelease
+
+      - name: Upload anime3rb APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: anime3rb-APK
+          path: "src/ar/anime3rb/build/outputs/apk/release/*.apk"
