@@ -1,37 +1,18 @@
 package eu.kanade.tachiyomi.animeextension.ar.anime3rb
 
-import android.annotation.SuppressLint
-import android.webkit.CookieManager
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.webkit.SslErrorHandler
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
-import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.Headers
-import eu.kanade.tachiyomi.util.asJsoup
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import android.os.Handler
-import android.os.Looper
-import android.view.ViewGroup
-import java.net.HttpURLConnection
-import java.net.URL
-import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
 import org.json.JSONArray
-import org.json.JSONObject
 
 class Anime3rb : ParsedAnimeHttpSource() {
 
@@ -40,7 +21,8 @@ class Anime3rb : ParsedAnimeHttpSource() {
     override val lang = "ar"
     override val supportsLatest = true
 
-    override val client: OkHttpClient = network.client
+    // Uses Aniyomi's native browser client to bypass Cloudflare automatically
+    override val client: OkHttpClient = network.cloudflareClient
 
     companion object {
         private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
@@ -91,7 +73,7 @@ class Anime3rb : ParsedAnimeHttpSource() {
         anime.title = cleanTitleText(rawTitle)
             .replace(Regex("الحلقة \\d+"), "")
             .replace("( مسلسل )", "")
-            .replace("( film )", "")
+            .replace("( فيلم )", "")
             .trim()
 
         anime.thumbnail_url = document.selectFirst("img[alt*=بوستر]")?.attr("src")
@@ -124,48 +106,74 @@ class Anime3rb : ParsedAnimeHttpSource() {
     // ============================== EXTRACTOR PIPELINE ==============================
     override fun videoListParse(response: Response): List<Video> {
         val videoList = mutableListOf<Video>()
-        val currentUrl = response.request.url.toString()
+        val document = response.asJsoup()
+        
+        // Ported from your Cloudstream Logic: Find the direct player iframe element on the page
+        val iframeUrl = document.selectFirst("iframe[src*=/player/]")?.attr("src") 
+            ?: document.selectFirst("iframe")?.attr("src") 
+            ?: ""
 
-        val rawLinks = runBlocking {
-            hijackAndExtractRaw(currentUrl)
-        }
+        if (iframeUrl.isBlank()) return emptyList()
 
         val videoHeaders = Headers.Builder()
             .add("User-Agent", USER_AGENT)
-            .add("Referer", "https://video.vid3rb.com/")
+            .add("Referer", baseUrl)
             .add("Accept", "*/*")
             .build()
 
-        rawLinks.forEach { (src, label) ->
-            if (src.contains(".m3u8")) {
-                try {
-                    val playlistResponse = client.newCall(GET(src, videoHeaders)).execute()
-                    if (playlistResponse.isSuccessful) {
-                        val body = playlistResponse.body?.string() ?: ""
-                        if (body.contains("#EXT-X-STREAM-INF")) {
-                            val lines = body.split("\n")
-                            for (i in lines.indices) {
-                                if (lines[i].contains("#EXT-X-STREAM-INF")) {
-                                    val resMatch = Regex("""RESOLUTION=(\d+x\d+)""").find(lines[i])
-                                    val height = resMatch?.groupValues?.get(1)?.split("x")?.get(1) ?: label
-                                    
-                                    var videoUrl = lines[i + 1].trim()
-                                    if (!videoUrl.startsWith("http")) {
-                                        val baseUrlPath = src.substring(0, src.lastIndexOf("/") + 1)
-                                        videoUrl = baseUrlPath + videoUrl
+        try {
+            // Directly fetch the player content via OkHttp
+            val playerResponse = client.newCall(GET(iframeUrl, videoHeaders)).execute()
+            if (playerResponse.isSuccessful) {
+                val playerHtml = playerResponse.body?.string() ?: ""
+                
+                // Matches your exact extraction regex string: var video_sources = [...]
+                val jsonPattern = """var\s+video_sources\s*=\s*(\[[^;]+]);""".toRegex()
+                val jsonMatch = jsonPattern.find(playerHtml)
+
+                if (jsonMatch != null) {
+                    val jsonStr = jsonMatch.groupValues[1]
+                    val jsonArray = JSONArray(jsonStr)
+                    
+                    for (i in 0 until jsonArray.length()) {
+                        val item = jsonArray.getJSONObject(i)
+                        val src = if (item.has("src")) item.getString("src") else if (item.has("file")) item.getString("file") else ""
+                        val label = if (item.has("label")) item.getString("label") else "Default"
+                        
+                        if (src.isNotBlank()) {
+                            if (src.contains(".m3u8")) {
+                                try {
+                                    val playlistResponse = client.newCall(GET(src, videoHeaders)).execute()
+                                    if (playlistResponse.isSuccessful) {
+                                        val body = playlistResponse.body?.string() ?: ""
+                                        if (body.contains("#EXT-X-STREAM-INF")) {
+                                            val lines = body.split("\n")
+                                            for (j in lines.indices) {
+                                                if (lines[j].contains("#EXT-X-STREAM-INF")) {
+                                                    val resMatch = Regex("""RESOLUTION=(\d+x\d+)""").find(lines[j])
+                                                    val height = resMatch?.groupValues?.get(1)?.split("x")?.get(1) ?: label
+                                                    
+                                                    var videoUrl = lines[j + 1].trim()
+                                                    if (!videoUrl.startsWith("http")) {
+                                                        val baseUrlPath = src.substring(0, src.lastIndexOf("/") + 1)
+                                                        videoUrl = baseUrlPath + videoUrl
+                                                    }
+                                                    videoList.add(Video(videoUrl, "${height}p - Anime3rb", videoUrl, headers = videoHeaders))
+                                                }
+                                            }
+                                        }
                                     }
-                                    videoList.add(Video(videoUrl, "${height}p - Anime3rb", videoUrl, headers = videoHeaders))
-                                }
+                                } catch (_: Exception) {}
+                            }
+                            
+                            if (videoList.none { it.videoUrl == src }) {
+                                videoList.add(Video(src, "$label - Anime3rb", src, headers = videoHeaders))
                             }
                         }
                     }
-                } catch (_: Exception) {}
+                }
             }
-            
-            if (videoList.none { it.videoUrl == src }) {
-                videoList.add(Video(src, "$label - Anime3rb", src, headers = videoHeaders))
-            }
-        }
+        } catch (_: Exception) {}
 
         return videoList
     }
@@ -173,118 +181,6 @@ class Anime3rb : ParsedAnimeHttpSource() {
     override fun videoListSelector(): String = throw UnsupportedOperationException("Not used")
     override fun videoFromElement(element: Element): Video = throw UnsupportedOperationException("Not used")
     override fun videoUrlParse(document: Document): String = throw UnsupportedOperationException("Not used")
-
-    // ============================== HEADLESS INTERCEPTOR ==============================
-    @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun hijackAndExtractRaw(
-        url: String,
-        timeoutMs: Long = 30_000L
-    ): List<Pair<String, String>> = withContext(Dispatchers.Main) {
-        suspendCoroutine { cont ->
-            // Uses standard parameter loop context natively supported across all standard Android versions
-            val webView = WebView(runBlocking(Dispatchers.Main) { android.app.Activity().applicationContext ?: WebView(android.app.Activity()).context })
-            webView.settings.apply {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                userAgentString = USER_AGENT
-                blockNetworkImage = false
-                mediaPlaybackRequiresUserGesture = false
-            }
-            CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
-
-            val extractedRaw = mutableListOf<Pair<String, String>>()
-            var isDone = false
-            val handler = Handler(Looper.getMainLooper())
-
-            fun finish() {
-                if (isDone) return
-                isDone = true
-                try {
-                    handler.removeCallbacksAndMessages(null)
-                    webView.destroy()
-                } catch (_: Exception) {}
-                cont.resume(extractedRaw.distinctBy { it.first })
-            }
-
-            handler.postDelayed({ finish() }, timeoutMs)
-
-            webView.webViewClient = object : WebViewClient() {
-                @SuppressLint("WebViewClientOnReceivedSslError")
-                override fun onReceivedSslError(v: WebView?, h: SslErrorHandler?, e: android.net.http.SslError?) = h!!.proceed()
-
-                override fun shouldInterceptRequest(
-                    view: WebView?,
-                    request: android.webkit.WebResourceRequest?
-                ): android.webkit.WebResourceResponse? {
-                    if (request == null || request.url == null) return super.shouldInterceptRequest(view, request)
-                    val reqUrl = request.url.toString()
-
-                    if (reqUrl.contains("/player/") && !reqUrl.contains("cf_token=")) {
-                        Thread {
-                            try {
-                                val connection = URL(reqUrl).openConnection() as HttpURLConnection
-                                connection.requestMethod = "GET"
-                                request.requestHeaders?.forEach { (k, v) ->
-                                    if (!k.equals("Accept-Encoding", true)) connection.setRequestProperty(k, v)
-                                }
-                                CookieManager.getInstance().getCookie(url)?.let { connection.setRequestProperty("Cookie", it) }
-                                connection.setRequestProperty("Referer", url)
-
-                                val playerHtml = (if (connection.responseCode < 400) connection.inputStream else connection.errorStream).bufferedReader().readText()
-                                val jsonPattern = """var\s+video_sources\s*=\s*(\[[^;]+]);""".toRegex()
-                                val jsonMatch = jsonPattern.find(playerHtml)
-
-                                if (jsonMatch != null) {
-                                    val jsonStr = jsonMatch.groupValues[1]
-                                    val jsonArray = JSONArray(jsonStr)
-                                    for (i in 0 until jsonArray.length()) {
-                                        val item = jsonArray.getJSONObject(i)
-                                        val src = if (item.has("src")) item.getString("src") else if (item.has("file")) item.getString("file") else ""
-                                        val label = if (item.has("label")) item.getString("label") else "Default"
-                                        if (src.isNotBlank()) extractedRaw.add(src to label)
-                                    }
-
-                                    if (extractedRaw.isNotEmpty()) {
-                                        handler.post { finish() }
-                                    }
-                                }
-                            } catch (_: Exception) {}
-                        }.start()
-                        return super.shouldInterceptRequest(view, request)
-                    }
-
-                    if (reqUrl.contains("/sources") && reqUrl.contains("cf_token=")) {
-                        Thread {
-                            try {
-                                val connection = URL(reqUrl).openConnection() as HttpURLConnection
-                                connection.requestMethod = "GET"
-                                request.requestHeaders?.forEach { (k, v) ->
-                                    if (!k.equals("Accept-Encoding", true)) connection.setRequestProperty(k, v)
-                                }
-                                CookieManager.getInstance().getCookie(reqUrl)?.let { connection.setRequestProperty("Cookie", it) }
-
-                                val jsonString = (if (connection.responseCode < 400) connection.inputStream else connection.errorStream).bufferedReader().readText()
-                                val jsonArray = JSONArray(jsonString)
-                                for (i in 0 until jsonArray.length()) {
-                                    val item = jsonArray.getJSONObject(i)
-                                    val src = if (item.has("src")) item.getString("src") else if (item.has("file")) item.getString("file") else ""
-                                    val label = if (item.has("label")) item.getString("label") else "Default"
-                                    if (src.isNotBlank()) extractedRaw.add(src to label)
-                                }
-
-                                if (extractedRaw.isNotEmpty()) {
-                                    handler.post { finish() }
-                                }
-                            } catch (_: Exception) {}
-                        }.start()
-                    }
-                    return super.shouldInterceptRequest(view, request)
-                }
-            }
-
-            webView.loadUrl(url)
-        }
-    }
 
     private fun cleanTitleText(text: String): String {
         return text.replace("\\n", " ")
