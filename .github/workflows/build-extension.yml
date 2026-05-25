@@ -3,9 +3,9 @@ name: Build Single Aniyomi Extension
 on:
   push:
     branches:
-      - master   # Matches your 'master' branch from the screenshot
+      - master
       - main
-  workflow_dispatch: # Allows manual building via GitHub UI
+  workflow_dispatch:
 
 jobs:
   build:
@@ -26,10 +26,15 @@ jobs:
       - name: Grant Execute Permission to Gradlew
         run: chmod +x ./gradlew
 
-      # This target tells Gradle to ONLY build the anime3rb submodule
+      # Fixes formatting errors ONLY for anime3rb
+      - name: Auto-Format Code with Spotless
+        run: ./gradlew :src:ar:anime3rb:spotlessApply
+
+      # Compiles ONLY the anime3rb APK
       - name: Build anime3rb APK Only
         run: ./gradlew :src:ar:anime3rb:assembleRelease
 
+      # Grabs ONLY the finished anime3rb APK
       - name: Upload anime3rb APK
         uses: actions/upload-artifact@v4
         with:
