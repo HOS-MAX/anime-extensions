@@ -32,8 +32,6 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import org.json.JSONArray
 import org.json.JSONObject
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 
 class Anime3rb : ParsedAnimeHttpSource() {
 
@@ -53,45 +51,38 @@ class Anime3rb : ParsedAnimeHttpSource() {
         .add("Referer", "$baseUrl/")
 
     // ============================== POPULAR / HOME ANIME ==============================
-    override fun popularAnimeRequest(page: Int): Request = GET("$baseUrl/", headers)
+    override fun popularAnimeRequest(page: Int): Request = GET("$baseUrl/anime-list?page=$page", headers)
 
-    override fun popularAnimeSelector(): String = "#videos a.video-card, .glide__slide:not(.glide__slide--clone) a.video-card"
+    override fun popularAnimeSelector(): String = "div.custom-col, div.grid a.video-card, a.simple-title-card"
 
     override fun popularAnimeFromElement(element: Element): SAnime {
         val anime = SAnime.create()
-        anime.setUrlWithoutDomain(element.attr("href"))
-        anime.title = cleanTitleText(element.select("h3.title-name").text())
+        val anchor = if (element.tagName() == "a") element else element.selectFirst("a")!!
+        anime.setUrlWithoutDomain(anchor.attr("href"))
+        anime.title = cleanTitleText(element.select("h1.title, h3.title-name, h4").text())
         anime.thumbnail_url = element.select("img").attr("src")
         return anime
     }
 
-    override fun popularAnimeNextPageSelector(): String? = null
+    override fun popularAnimeNextPageSelector(): String = "li.page-item a[rel=next]"
 
     // ============================== LATEST ANIME ==============================
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/", headers)
+    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/latest-episodes?page=$page", headers)
 
-    override fun latestUpdatesSelector(): String = "#videos a.video-card"
+    override fun latestUpdatesSelector(): String = popularAnimeSelector()
 
     override fun latestUpdatesFromElement(element: Element): SAnime = popularAnimeFromElement(element)
 
-    override fun latestUpdatesNextPageSelector(): String? = null
+    override fun latestUpdatesNextPageSelector(): String = popularAnimeNextPageSelector()
 
     // ============================== ANIME SEARCH ==============================
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
-        return GET("$baseUrl/anime-list?search=$query", headers)
+        return GET("$baseUrl/anime-list?search=$query&page=$page", headers)
     }
 
-    override fun searchAnimeSelector(): String = "a.simple-title-card, div.custom-col, a.video-card"
-    
-    override fun searchAnimeFromElement(element: Element): SAnime {
-        val anime = SAnime.create()
-        anime.setUrlWithoutDomain(element.attr("href"))
-        anime.title = cleanTitleText(element.select("h4, h3.title-name, h1.title").text())
-        anime.thumbnail_url = element.select("img").attr("src")
-        return anime
-    }
-    
-    override fun searchAnimeNextPageSelector(): String? = null
+    override fun searchAnimeSelector(): String = popularAnimeSelector()
+    override fun searchAnimeFromElement(element: Element): SAnime = popularAnimeFromElement(element)
+    override fun searchAnimeNextPageSelector(): String = popularAnimeNextPageSelector()
 
     // ============================== ANIME DETAILS ==============================
     override fun animeDetailsParse(document: Document): SAnime {
@@ -100,7 +91,7 @@ class Anime3rb : ParsedAnimeHttpSource() {
         anime.title = cleanTitleText(rawTitle)
             .replace(Regex("الحلقة \\d+"), "")
             .replace("( مسلسل )", "")
-            .replace("( فيلم )", "")
+            .replace("( film )", "")
             .trim()
 
         anime.thumbnail_url = document.selectFirst("img[alt*=بوستر]")?.attr("src")
@@ -110,7 +101,7 @@ class Anime3rb : ParsedAnimeHttpSource() {
     }
 
     // ============================== EPISODES ==============================
-    override fun episodeListSelector(): String = ".video-list a, .episodes-list a"
+    override fun episodeListSelector(): String = "div.video-list a, .episodes-list a, div.grid a[href*=/episode/]"
 
     override fun episodeListFromElement(element: Element): SEpisode {
         val episode = SEpisode.create()
@@ -134,7 +125,7 @@ class Anime3rb : ParsedAnimeHttpSource() {
     override fun videoListParse(response: Response): List<Video> {
         val videoList = mutableListOf<Video>()
         val currentUrl = response.request.url.toString()
-        
+
         val rawLinks = runBlocking {
             hijackAndExtractRaw(currentUrl)
         }
@@ -190,9 +181,8 @@ class Anime3rb : ParsedAnimeHttpSource() {
         timeoutMs: Long = 30_000L
     ): List<Pair<String, String>> = withContext(Dispatchers.Main) {
         suspendCoroutine { cont ->
-            val context = Injekt.get<android.app.Application>()
-
-            val webView = WebView(context)
+            // Uses standard parameter loop context natively supported across all standard Android versions
+            val webView = WebView(runBlocking(Dispatchers.Main) { android.app.Activity().applicationContext ?: WebView(android.app.Activity()).context })
             webView.settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
@@ -211,7 +201,6 @@ class Anime3rb : ParsedAnimeHttpSource() {
                 isDone = true
                 try {
                     handler.removeCallbacksAndMessages(null)
-                    (webView.parent as? ViewGroup)?.removeView(webView)
                     webView.destroy()
                 } catch (_: Exception) {}
                 cont.resume(extractedRaw.distinctBy { it.first })
@@ -227,8 +216,8 @@ class Anime3rb : ParsedAnimeHttpSource() {
                     view: WebView?,
                     request: android.webkit.WebResourceRequest?
                 ): android.webkit.WebResourceResponse? {
-                    if (request == null) return super.shouldInterceptRequest(view, request)
-                    val reqUrl = request.url?.toString() ?: return super.shouldInterceptRequest(view, request)
+                    if (request == null || request.url == null) return super.shouldInterceptRequest(view, request)
+                    val reqUrl = request.url.toString()
 
                     if (reqUrl.contains("/player/") && !reqUrl.contains("cf_token=")) {
                         Thread {
