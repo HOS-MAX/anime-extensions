@@ -5,6 +5,7 @@ import android.webkit.CookieManager
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.SslErrorHandler
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.SAnime
@@ -24,8 +25,15 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import android.os.Handler
 import android.os.Looper
+import android.view.ViewGroup
+import java.net.HttpURLConnection
+import java.net.URL
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
+import org.json.JSONArray
+import org.json.JSONObject
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 
 class Anime3rb : ParsedAnimeHttpSource() {
 
@@ -36,116 +44,123 @@ class Anime3rb : ParsedAnimeHttpSource() {
 
     override val client: OkHttpClient = network.client
 
-    private val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+    companion object {
+        private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+    }
 
     override fun headersBuilder(): Headers.Builder = Headers.Builder()
         .add("User-Agent", USER_AGENT)
-        .add("Referer", baseUrl)
+        .add("Referer", "$baseUrl/")
 
-    // ============================== POPULAR ANIME ==============================
-    override fun popularAnimeRequest(page: Int): Request = GET("$baseUrl/anime-list?page=$page", headers)
+    // ============================== POPULAR / HOME ANIME ==============================
+    override fun popularAnimeRequest(page: Int): Request = GET("$baseUrl/", headers)
 
-    override fun popularAnimeSelector(): String = "div.custom-col"
+    override fun popularAnimeSelector(): String = "#videos a.video-card, .glide__slide:not(.glide__slide--clone) a.video-card"
 
     override fun popularAnimeFromElement(element: Element): SAnime {
         val anime = SAnime.create()
-        val anchor = element.selectFirst("a")
-        anime.setUrlWithoutDomain(anchor.attr("href"))
-        anime.title = element.selectFirst("h1.title")?.text() ?: ""
-        anime.thumbnail_url = element.selectFirst("img")?.attr("src")
+        anime.setUrlWithoutDomain(element.attr("href"))
+        anime.title = cleanTitleText(element.select("h3.title-name").text())
+        anime.thumbnail_url = element.select("img").attr("src")
         return anime
     }
 
-    override fun popularAnimeNextPageSelector(): String = "li.page-item a[rel=next]"
+    override fun popularAnimeNextPageSelector(): String? = null
 
     // ============================== LATEST ANIME ==============================
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/latest-episodes?page=$page", headers)
+    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/", headers)
 
-    override fun latestUpdatesSelector(): String = "div.custom-col"
+    override fun latestUpdatesSelector(): String = "#videos a.video-card"
 
-    override fun latestUpdatesFromElement(element: Element): SAnime {
-        val anime = SAnime.create()
-        val anchor = element.selectFirst("a")
-        val href = anchor.attr("href")
-        val cleanHref = if (href.contains("/episode/")) href.replace("/episode/", "/anime/") else href
-        anime.setUrlWithoutDomain(cleanHref)
-        anime.title = element.selectFirst("h1.title")?.text()?.replace(Regex("الحلقة \\d+"), "")?.trim() ?: ""
-        anime.thumbnail_url = element.selectFirst("img")?.attr("src")
-        return anime
-    }
+    override fun latestUpdatesFromElement(element: Element): SAnime = popularAnimeFromElement(element)
 
-    override fun latestUpdatesNextPageSelector(): String = "li.page-item a[rel=next]"
+    override fun latestUpdatesNextPageSelector(): String? = null
 
     // ============================== ANIME SEARCH ==============================
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
-        return GET("$baseUrl/search?q=$query&page=$page", headers)
+        return GET("$baseUrl/anime-list?search=$query", headers)
     }
 
-    override fun searchAnimeSelector(): String = popularAnimeSelector()
-    override fun searchAnimeFromElement(element: Element): SAnime = popularAnimeFromElement(element)
-    override fun searchAnimeNextPageSelector(): String = popularAnimeNextPageSelector()
+    override fun searchAnimeSelector(): String = "a.simple-title-card, div.custom-col, a.video-card"
+    
+    override fun searchAnimeFromElement(element: Element): SAnime {
+        val anime = SAnime.create()
+        anime.setUrlWithoutDomain(element.attr("href"))
+        anime.title = cleanTitleText(element.select("h4, h3.title-name, h1.title").text())
+        anime.thumbnail_url = element.select("img").attr("src")
+        return anime
+    }
+    
+    override fun searchAnimeNextPageSelector(): String? = null
 
     // ============================== ANIME DETAILS ==============================
     override fun animeDetailsParse(document: Document): SAnime {
         val anime = SAnime.create()
-        anime.title = document.selectFirst("h1")?.text() ?: ""
+        val rawTitle = document.selectFirst("h1")?.text() ?: ""
+        anime.title = cleanTitleText(rawTitle)
+            .replace(Regex("الحلقة \\d+"), "")
+            .replace("( مسلسل )", "")
+            .replace("( فيلم )", "")
+            .trim()
+
         anime.thumbnail_url = document.selectFirst("img[alt*=بوستر]")?.attr("src")
-        anime.description = document.select("div.py-4.flex.flex-col.gap-2 p, p.synopsis").joinToString("\n") { it.text() }.trim()
+        anime.description = document.select("div.py-4.flex.flex-col.gap-2 p, p.synopsis, meta[name=description]").joinToString("\n") { it.text().trim() }.trim()
         anime.status = SAnime.UNKNOWN
         return anime
     }
 
     // ============================== EPISODES ==============================
-    override fun episodeListSelector(): String = "div.video-list a, .episodes-list a"
+    override fun episodeListSelector(): String = ".video-list a, .episodes-list a"
 
     override fun episodeListFromElement(element: Element): SEpisode {
         val episode = SEpisode.create()
         episode.setUrlWithoutDomain(element.attr("href"))
         
-        val titleText = element.text()
-        episode.name = titleText
-        
-        val epNumStr = Regex("[^0-9]").replace(titleText, "")
+        val videoData = element.selectFirst(".video-data")
+        val epText = cleanTitleText(videoData?.selectFirst("span")?.text() ?: videoData?.children()?.getOrNull(0)?.text() ?: element.text())
+        val epName = cleanTitleText(videoData?.selectFirst("p")?.text() ?: videoData?.children()?.getOrNull(1)?.text() ?: "")
+
+        episode.name = if (epName.isNotBlank()) epName else epText
+        val epNumStr = Regex("[^0-9]").replace(epText, "")
         episode.episode_number = epNumStr.toFloatOrNull() ?: 1f
         return episode
     }
 
-    // ============================== VIDEO EXTRACTION ==============================
+    override fun episodeListParse(response: Response): List<SEpisode> {
+        return super.episodeListParse(response).reversed()
+    }
+
+    // ============================== EXTRACTOR PIPELINE ==============================
     override fun videoListParse(response: Response): List<Video> {
         val videoList = mutableListOf<Video>()
         val currentUrl = response.request.url.toString()
         
-        // Execute the webview script synchronously on the background context 
-        val rawMasterStreamUrl = runBlocking {
+        val rawLinks = runBlocking {
             hijackAndExtractRaw(currentUrl)
         }
 
-        if (rawMasterStreamUrl.isNotEmpty()) {
-            val videoHeaders = Headers.Builder()
-                .add("User-Agent", USER_AGENT)
-                .add("Referer", "https://video.vid3rb.com/")
-                .add("Accept", "*/*")
-                .build()
+        val videoHeaders = Headers.Builder()
+            .add("User-Agent", USER_AGENT)
+            .add("Referer", "https://video.vid3rb.com/")
+            .add("Accept", "*/*")
+            .build()
 
-            // Regular expression to break down alternative layouts inside master playlist streams
-            if (rawMasterStreamUrl.contains(".m3u8")) {
+        rawLinks.forEach { (src, label) ->
+            if (src.contains(".m3u8")) {
                 try {
-                    // Extract track playlists recursively using standard HLS playlists
-                    val playlistResponse = client.newCall(GET(rawMasterStreamUrl, videoHeaders)).execute()
+                    val playlistResponse = client.newCall(GET(src, videoHeaders)).execute()
                     if (playlistResponse.isSuccessful) {
                         val body = playlistResponse.body?.string() ?: ""
-                        
                         if (body.contains("#EXT-X-STREAM-INF")) {
-                            // Split multi-qualities (1080p, 720p, 480p, 360p) manually into Aniyomi track objects
-                            var lines = body.split("\n")
+                            val lines = body.split("\n")
                             for (i in lines.indices) {
                                 if (lines[i].contains("#EXT-X-STREAM-INF")) {
-                                    val resolutionMatch = Regex("""RESOLUTION=(\d+x\d+)""").find(lines[i])
-                                    val height = resolutionMatch?.groupValues?.get(1)?.split("x")?.get(1) ?: "Video"
+                                    val resMatch = Regex("""RESOLUTION=(\d+x\d+)""").find(lines[i])
+                                    val height = resMatch?.groupValues?.get(1)?.split("x")?.get(1) ?: label
                                     
                                     var videoUrl = lines[i + 1].trim()
                                     if (!videoUrl.startsWith("http")) {
-                                        val baseUrlPath = rawMasterStreamUrl.substring(0, rawMasterStreamUrl.lastIndexOf("/") + 1)
+                                        val baseUrlPath = src.substring(0, src.lastIndexOf("/") + 1)
                                         videoUrl = baseUrlPath + videoUrl
                                     }
                                     videoList.add(Video(videoUrl, "${height}p - Anime3rb", videoUrl, headers = videoHeaders))
@@ -153,14 +168,11 @@ class Anime3rb : ParsedAnimeHttpSource() {
                             }
                         }
                     }
-                } catch (e: Exception) {
-                    // Fail gracefully
-                }
+                } catch (_: Exception) {}
             }
             
-            // Safe fallback rule if it is a flat playlist link or direct media output stream
-            if (videoList.isEmpty()) {
-                videoList.add(Video(rawMasterStreamUrl, "Auto Quality", rawMasterStreamUrl, headers = videoHeaders))
+            if (videoList.none { it.videoUrl == src }) {
+                videoList.add(Video(src, "$label - Anime3rb", src, headers = videoHeaders))
             }
         }
 
@@ -171,71 +183,125 @@ class Anime3rb : ParsedAnimeHttpSource() {
     override fun videoFromElement(element: Element): Video = throw UnsupportedOperationException("Not used")
     override fun videoUrlParse(document: Document): String = throw UnsupportedOperationException("Not used")
 
-    // ============================== WEBVIEW INJECTOR LOOP ==============================
+    // ============================== HEADLESS INTERCEPTOR ==============================
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun hijackAndExtractRaw(url: String): String = withContext(Dispatchers.Main) {
-        suspendCoroutine { continuation ->
-            val context = eu.kanade.tachiyomi.App.getAppContext() ?: run {
-                continuation.resume("")
-                return@suspendCoroutine
-            }
+    private suspend fun hijackAndExtractRaw(
+        url: String,
+        timeoutMs: Long = 30_000L
+    ): List<Pair<String, String>> = withContext(Dispatchers.Main) {
+        suspendCoroutine { cont ->
+            // Replaced custom app call context loop with the standard Injekt runner module
+            val context = Injekt.get<android.app.Application>()
 
             val webView = WebView(context)
-            val settings = webView.settings
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            settings.databaseEnabled = true
-            settings.useWideViewPort = true
-            settings.loadWithOverviewMode = true
-            settings.cacheMode = WebSettings.LOAD_DEFAULT
-            settings.userAgentString = USER_AGENT
-
-            CookieManager.getInstance().setAcceptCookie(true)
-
-            var resolved = false
-            val handler = Handler(Looper.getMainLooper())
-            
-            val timeoutRunnable = Runnable {
-                if (!resolved) {
-                    resolved = true
-                    webView.destroy()
-                    continuation.resume("")
-                }
+            webView.settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                userAgentString = USER_AGENT
+                blockNetworkImage = false
+                mediaPlaybackRequiresUserGesture = false
             }
-            handler.postDelayed(timeoutRunnable, 15000)
+            CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
+
+            val extractedRaw = mutableListOf<Pair<String, String>>()
+            var isDone = false
+            val handler = Handler(Looper.getMainLooper())
+
+            fun finish() {
+                if (isDone) return
+                isDone = true
+                try {
+                    handler.removeCallbacksAndMessages(null)
+                    (webView.parent as? ViewGroup)?.removeView(webView)
+                    webView.destroy()
+                } catch (_: Exception) {}
+                cont.resume(extractedRaw.distinctBy { it.first })
+            }
+
+            handler.postDelayed({ finish() }, timeoutMs)
 
             webView.webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView?, currentUrl: String?) {
-                    super.onPageFinished(view, currentUrl)
-                    
-                    handler.postDelayed(object : Runnable {
-                        override fun run() {
-                            if (resolved) return
-                            
-                            webView.evaluateJavascript(
-                                "(function() { " +
-                                "   var videos = document.getElementsByTagName('video');" +
-                                "   if(videos.length > 0 && videos[0].src) { return videos[0].src; }" +
-                                "   var sources = document.getElementsByTagName('source');" +
-                                "   if(sources.length > 0 && sources[0].src) { return sources[0].src; }" +
-                                "   return ''; " +
-                                "})();"
-                            ) { src ->
-                                val cleanSrc = src?.replace("\"", "") ?: ""
-                                if (cleanSrc.isNotEmpty() && cleanSrc.contains("m3u8")) {
-                                    resolved = true
-                                    handler.removeCallbacks(timeoutRunnable)
-                                    webView.destroy()
-                                    continuation.resume(cleanSrc)
-                                } else {
-                                    if (!resolved) handler.postDelayed(this, 1000)
+                @SuppressLint("WebViewClientOnReceivedSslError")
+                override fun onReceivedSslError(v: WebView?, h: SslErrorHandler?, e: android.net.http.SslError?) = h!!.proceed()
+
+                override fun shouldInterceptRequest(
+                    view: WebView?,
+                    request: android.webkit.WebResourceRequest?
+                ): android.webkit.WebResourceResponse? {
+                    val reqUrl = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
+
+                    if (reqUrl.contains("/player/") && !reqUrl.contains("cf_token=")) {
+                        Thread {
+                            try {
+                                val connection = URL(reqUrl).openConnection() as HttpURLConnection
+                                connection.requestMethod = "GET"
+                                request.requestHeaders?.forEach { (k, v) ->
+                                    if (!k.equals("Accept-Encoding", true)) connection.setRequestProperty(k, v)
                                 }
-                            }
-                        }
-                    }, 2000)
+                                CookieManager.getInstance().getCookie(url)?.let { connection.setRequestProperty("Cookie", it) }
+                                connection.setRequestProperty("Referer", url)
+
+                                val playerHtml = (if (connection.responseCode < 400) connection.inputStream else connection.errorStream).bufferedReader().readText()
+                                val jsonPattern = """var\s+video_sources\s*=\s*(\[[^;]+]);""".toRegex()
+                                val jsonMatch = jsonPattern.find(playerHtml)
+
+                                if (jsonMatch != null) {
+                                    val jsonStr = jsonMatch.groupValues[1]
+                                    val jsonArray = JSONArray(jsonStr)
+                                    for (i in 0 until jsonArray.length()) {
+                                        val item = jsonArray.getJSONObject(i)
+                                        val src = if (item.has("src")) item.getString("src") else if (item.has("file")) item.getString("file") else ""
+                                        val label = if (item.has("label")) item.getString("label") else "Default"
+                                        if (src.isNotBlank()) extractedRaw.add(src to label)
+                                    }
+
+                                    if (extractedRaw.isNotEmpty()) {
+                                        handler.post { finish() }
+                                    }
+                                }
+                            } catch (_: Exception) {}
+                        }.start()
+                        return super.shouldInterceptRequest(view, request)
+                    }
+
+                    if (reqUrl.contains("/sources") && reqUrl.contains("cf_token=")) {
+                        Thread {
+                            try {
+                                val connection = URL(reqUrl).openConnection() as HttpURLConnection
+                                connection.requestMethod = "GET"
+                                request.requestHeaders?.forEach { (k, v) ->
+                                    if (!k.equals("Accept-Encoding", true)) connection.setRequestProperty(k, v)
+                                }
+                                CookieManager.getInstance().getCookie(reqUrl)?.let { connection.setRequestProperty("Cookie", it) }
+
+                                val jsonString = (if (connection.responseCode < 400) connection.inputStream else connection.errorStream).bufferedReader().readText()
+                                val jsonArray = JSONArray(jsonString)
+                                for (i in 0 until jsonArray.length()) {
+                                    val item = jsonArray.getJSONObject(i)
+                                    val src = if (item.has("src")) item.getString("src") else if (item.has("file")) item.getString("file") else ""
+                                    val label = if (item.has("label")) item.getString("label") else "Default"
+                                    if (src.isNotBlank()) extractedRaw.add(src to label)
+                                }
+
+                                if (extractedRaw.isNotEmpty()) {
+                                    handler.post { finish() }
+                                }
+                            } catch (_: Exception) {}
+                        }.start()
+                    }
+                    return super.shouldInterceptRequest(view, request)
                 }
             }
+
             webView.loadUrl(url)
         }
+    }
+
+    private fun cleanTitleText(text: String): String {
+        return text.replace("\\n", " ")
+            .replace("\n", " ")
+            .replace(Regex("بترجمة.*"), "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
     }
 }
