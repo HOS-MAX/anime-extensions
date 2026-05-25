@@ -190,7 +190,6 @@ class Anime3rb : ParsedAnimeHttpSource() {
         timeoutMs: Long = 30_000L
     ): List<Pair<String, String>> = withContext(Dispatchers.Main) {
         suspendCoroutine { cont ->
-            // Replaced custom app call context loop with the standard Injekt runner module
             val context = Injekt.get<android.app.Application>()
 
             val webView = WebView(context)
@@ -228,7 +227,8 @@ class Anime3rb : ParsedAnimeHttpSource() {
                     view: WebView?,
                     request: android.webkit.WebResourceRequest?
                 ): android.webkit.WebResourceResponse? {
-                    val reqUrl = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
+                    if (request == null) return super.shouldInterceptRequest(view, request)
+                    val reqUrl = request.url?.toString() ?: return super.shouldInterceptRequest(view, request)
 
                     if (reqUrl.contains("/player/") && !reqUrl.contains("cf_token=")) {
                         Thread {
