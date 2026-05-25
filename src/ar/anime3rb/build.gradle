@@ -1,11 +1,12 @@
-apply plugin: 'com.android.application'
-apply plugin: 'kotlin-android'
-apply plugin: 'kotlinx-serialization'
-
 ext {
-    extName = 'Anim3rbtest'
+    extName = 'Anime3rb'
     extClass = '.Anime3rb'
-    extVersionCode = 1
-    libVersion = '14'
+    extVersionCode = 1  // You can change this code number if you update it later
 }
+
 apply from: "$rootDir/common.gradle"
+
+dependencies {
+    // If anime3rb needs video extractors, add them here just like Anime4up did.
+    // If it doesn't need any special extractors, you can leave this dependencies block empty.
+}
