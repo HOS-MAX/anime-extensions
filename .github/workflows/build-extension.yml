@@ -30,13 +30,13 @@ jobs:
       - name: Auto-Format Code with Spotless
         run: ./gradlew :src:ar:anime3rb:spotlessApply
 
-      # Compiles ONLY the anime3rb APK
+      # Bypasses the signing key requirement by building a debug APK
       - name: Build anime3rb APK Only
-        run: ./gradlew :src:ar:anime3rb:assembleRelease
+        run: ./gradlew :src:ar:anime3rb:assembleDebug
 
-      # Grabs ONLY the finished anime3rb APK
+      # Grabs your freshly generated APK file
       - name: Upload anime3rb APK
         uses: actions/upload-artifact@v4
         with:
           name: anime3rb-APK
-          path: "src/ar/anime3rb/build/outputs/apk/release/*.apk"
+          path: "src/ar/anime3rb/build/outputs/apk/debug/*.apk"
