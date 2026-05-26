@@ -16,21 +16,39 @@ import android.webkit.SslErrorHandler
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.MainPageRequest
+import com.lagradost.cloudstream3.HomePageResponse
+import com.lagradost.cloudstream3.HomePageList
+import com.lagradost.cloudstream3.SearchResponse
+import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.ExtractorLink
+import com.lagradost.cloudstream3.ExtractorLinkType
+import com.lagradost.cloudstream3.Qualities
+import com.lagradost.cloudstream3.mainPageOf
+import com.lagradost.cloudstream3.newAnimeSearchResponse
+import com.lagradost.cloudstream3.newHomePageResponse
+import com.lagradost.cloudstream3.newEpisode
+import com.lagradost.cloudstream3.newTvSeriesLoadResponse
+import com.lagradost.cloudstream3.newExtractorLink
+import com.lagradost.cloudstream3.addDubStatus
+import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.utils.AppUtils
+import com.lagradost.cloudstream3.utils.CloudflareSolver
+import com.lagradost.cloudstream3.utils.GET
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.io.ByteArrayInputStream
 import java.net.HttpURLConnection
 import java.net.URL
-import java.net.URLEncoder
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
 class Anime3rb(val context: Context) : MainAPI() {
     override var mainUrl = "https://anime3rb.com"
-    // تم تعديل الاسم إلى الاسم الأصلي المطلوب بناءً على تفضيلاتك بدلاً من الاسم المؤقت
     override var name = "Anime3rb" 
     override val hasMainPage = true
     override var lang = "ar"
@@ -417,7 +435,7 @@ class Anime3rb(val context: Context) : MainAPI() {
                     val epDoc = app.get(sampleEpisodeUrl).document
                     desc = epDoc.select("div.py-4.flex.flex-col.gap-2 p, p.synopsis").joinToString("\n") { it.text().trim() }
                     if (desc.isBlank()) {
-                        desc = doc.select("meta[name=description]").attr("content").trim()
+                        desc = epDoc.select("meta[name=description]").attr("content").trim()
                     }
                 } catch (e: Exception) {}
             }
@@ -433,7 +451,6 @@ class Anime3rb(val context: Context) : MainAPI() {
         } catch (e: Exception) { null }
     }
 
-    // تكييف وهندسة دالة الاستخراج لحقن البارامترات السريعة تلقائياً
     private suspend fun hijackAndExtractRaw(
         url: String,
         timeoutMs: Long = 60_000L
@@ -499,109 +516,7 @@ class Anime3rb(val context: Context) : MainAPI() {
                                         val label = item["label"]?.toString() ?: "Default"
                                         
                                         if (!src.isNullOrBlank()) {
-                                            // 🛠️ هنا تكمن الخدعة الذكية: هندسة الرابط البطيء وتحويله لـ سريع تلقائياً برمجياً
                                             if (src.contains("speed=133")) {
                                                 src = src.replace("speed=133", "speed=500")
                                                 if (!src.contains("&name=")) {
-                                                    src = "$src&name=[Anime3rb_Fast_Stream]_Video.mp4"
-                                                }
-                                            }
-                                            extractedRaw.add(src to label)
-                                        }
-                                    }
-
-                                    if (extractedRaw.isNotEmpty()) {
-                                        handler.post { finish() }
-                                    }
-                                }
-                            } catch (e: Exception) {}
-                        }.start()
-                        return super.shouldInterceptRequest(view, request)
-                    }
-
-                    if (reqUrl.contains("/sources") && reqUrl.contains("cf_token=")) {
-                        try {
-                            val connection = URL(reqUrl).openConnection() as HttpURLConnection
-                            connection.requestMethod = "GET"
-                            request.requestHeaders?.forEach { (k, v) ->
-                                if (!k.equals("Accept-Encoding", true)) connection.setRequestProperty(k, v)
-                            }
-                            CookieManager.getInstance().getCookie(reqUrl)?.let { connection.setRequestProperty("Cookie", it) }
-
-                            val responseBytes = (if (connection.responseCode < 400) connection.inputStream else connection.errorStream).readBytes()
-                            val jsonString = String(responseBytes, Charsets.UTF_8)
-
-                            val linksFromJson = AppUtils.parseJson<List<Map<String, Any?>>>(jsonString)
-                            linksFromJson.forEach { item ->
-                                var src = item["src"]?.toString() ?: item["file"]?.toString()
-                                val label = item["label"]?.toString() ?: "Default"
-                                
-                                if (!src.isNullOrBlank()) {
-                                    // 🛠️ فحص واستبدال الروابط المستخرجة من واجهة السورس أيضاً لتكون فائقة السرعة
-                                    if (src.contains("speed=133")) {
-                                        src = src.replace("speed=133", "speed=500")
-                                        if (!src.contains("&name=")) {
-                                            src = "$src&name=[Anime3rb_Fast_Stream]_Video.mp4"
-                                        }
-                                    }
-                                    extractedRaw.add(src to label)
-                                }
-                            }
-
-                            if (extractedRaw.isNotEmpty()) {
-                                handler.post { finish() }
-                            }
-
-                            val contentType = connection.contentType?.split(";")?.get(0) ?: "application/json"
-                            return android.webkit.WebResourceResponse(contentType, "UTF-8", ByteArrayInputStream(responseBytes)).apply {
-                                responseHeaders = mutableMapOf("Access-Control-Allow-Origin" to "*")
-                            }
-
-                        } catch (e: Exception) {}
-                    }
-                    return super.shouldInterceptRequest(view, request)
-                }
-            }
-
-            webView.loadUrl(url)
-        }
-    }
-
-    override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        val rawLinks = hijackAndExtractRaw(data)
-
-        if (rawLinks.isEmpty()) {
-            return false
-        }
-
-        rawLinks.forEach { (src, label) ->
-            try {
-                callback(
-                    newExtractorLink(
-                        source = this.name,
-                        name = "${this.name} $label (سيرفر صاروخي🚀)",
-                        url = src,
-                        type = ExtractorLinkType.VIDEO
-                    ) {
-                        referer = "https://video.vid3rb.com/"
-                    }
-                )
-            } catch (e: Exception) {}
-        }
-        return true
-    }
-
-    private fun extractQuality(label: String): Int {
-        return Regex("""(\d{3,4})p""", RegexOption.IGNORE_CASE)
-            .find(label)
-            ?.groupValues
-            ?.get(1)
-            ?.toIntOrNull()
-            ?: Qualities.Unknown.value
-    }
-}
+                                                    src = "$src&name=
