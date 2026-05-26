@@ -204,7 +204,7 @@ class Anime3rb :
         return doc.select(episodeListSelector()).map { episodeFromElement(it) }.reversed()
     }
 
-    // ============================== جلب الروابط السريعة المباشرة ==============================
+    // ============================== جلب الروابط وتطبيق الترتيب تلقائياً ==============================
 
     override fun videoListParse(response: Response): List<Video> {
         val url = response.request.url.toString()
@@ -218,8 +218,12 @@ class Anime3rb :
                 headers = headersBuilder().add("Referer", "https://video.vid3rb.com/").build(),
             )
         }
-        
-        return videoList.sortVideos() // تم تغيير اسم دالة الترتيب هنا لمنع التعارض البرمجي والخطأ
+
+        // نقوم بعمل الترتيب هنا مباشرة باستخدام خيارات المستخدم لمنع التداخل والتعارض
+        val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!
+        return videoList.sortedWith(
+            compareBy { it.quality.contains(quality) },
+        ).reversed()
     }
 
     override fun videoListSelector() = throw UnsupportedOperationException()
@@ -319,7 +323,7 @@ class Anime3rb :
             .trim()
     }
 
-    // ============================= الإعدادات والترتيب الخارجي ==============================
+    // ============================= الإعدادات وشاشة التفضيلات ==============================
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         ListPreference(screen.context).apply {
@@ -337,13 +341,5 @@ class Anime3rb :
                 preferences.edit().putString(key, entry).commit()
             }
         }.also(screen::addPreference)
-    }
-
-    // قمنا بتغيير اسم الامتداد من sort إلى sortVideos لتجنب أي تداخل مع الكود المدمج في مصفوفات الـ List
-    private fun List<Video>.sortVideos(): List<Video> {
-        val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!
-        return sortedWith(
-            compareBy { it.quality.contains(quality) },
-        ).reversed()
     }
 }
