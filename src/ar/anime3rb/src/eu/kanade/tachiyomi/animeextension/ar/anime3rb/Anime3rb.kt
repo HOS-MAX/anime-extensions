@@ -37,7 +37,6 @@ import com.lagradost.cloudstream3.addDubStatus
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.CloudflareSolver
-import com.lagradost.cloudstream3.utils.GET
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -49,7 +48,7 @@ import kotlin.coroutines.suspendCoroutine
 
 class Anime3rb(val context: Context) : MainAPI() {
     override var mainUrl = "https://anime3rb.com"
-    override var name = "Anime3rb" 
+    override var name = "Anime3rb"
     override val hasMainPage = true
     override var lang = "ar"
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
@@ -77,7 +76,7 @@ class Anime3rb(val context: Context) : MainAPI() {
         return when (result) {
             is SmartResult.Success -> result.document
             is SmartResult.NeedsCaptcha -> {
-               val activity = this.context as? Activity
+                val activity = this.context as? Activity
                 CloudflareSolver.solve(activity, url, USER_AGENT)
             }
             else -> null
@@ -116,8 +115,8 @@ class Anime3rb(val context: Context) : MainAPI() {
                 params.width = 1
                 params.height = 1
                 params.gravity = Gravity.TOP or Gravity.START
-                params.x = -10 
-                params.y = -10 
+                params.x = -10
+                params.y = -10
                 dialog.window?.attributes = params
 
                 val webView = WebView(activity)
@@ -132,7 +131,7 @@ class Anime3rb(val context: Context) : MainAPI() {
                         domStorageEnabled = true
                         databaseEnabled = true
                         userAgentString = USER_AGENT
-                        blockNetworkImage = true 
+                        blockNetworkImage = true
                     }
                 } catch (_: Exception) {}
 
@@ -259,7 +258,7 @@ class Anime3rb(val context: Context) : MainAPI() {
             "Content-Type" to "application/json",
             "Origin" to mainUrl,
             "Referer" to "$mainUrl/",
-            "Cookie" to savedCookies 
+            "Cookie" to savedCookies
         )
 
         val updateUrl = "$mainUrl/livewire/update"
@@ -448,9 +447,12 @@ class Anime3rb(val context: Context) : MainAPI() {
                 this.posterUrl = poster
                 this.plot = desc
             }
-        } catch (e: Exception) { null }
+        } catch (e: Exception) {
+            null
+        }
     }
 
+    // الدالة المعدلة: تذهب مباشرة لسورس التحميل الأصلي وتلتقط السيرفر السريع بدون اللجوء للمشغل البطيء
     private suspend fun hijackAndExtractRaw(
         url: String,
         timeoutMs: Long = 60_000L
@@ -493,7 +495,10 @@ class Anime3rb(val context: Context) : MainAPI() {
                 ): android.webkit.WebResourceResponse? {
                     val reqUrl = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
 
-                    if (reqUrl.contains("/player/") && !reqUrl.contains("cf_token=")) {
+                    // قمنا بإلغاء جلب الروابط من مسار /player/ لتفادي سيرفرات البث 133 البطيئة تماماً
+
+                    // تتبع مسار الـ /sources المستدعى مباشرة من صفحة التحميل للحصول على الـ speed=500 بشكل أصلي
+                    if (reqUrl.contains("/sources") && reqUrl.contains("cf_token=")) {
                         Thread {
                             try {
                                 val connection = URL(reqUrl).openConnection() as HttpURLConnection
@@ -501,22 +506,70 @@ class Anime3rb(val context: Context) : MainAPI() {
                                 request.requestHeaders?.forEach { (k, v) ->
                                     if (!k.equals("Accept-Encoding", true)) connection.setRequestProperty(k, v)
                                 }
-                                CookieManager.getInstance().getCookie(url)?.let { connection.setRequestProperty("Cookie", it) }
-                                connection.setRequestProperty("Referer", url)
+                                CookieManager.getInstance().getCookie(reqUrl)?.let { connection.setRequestProperty("Cookie", it) }
 
-                                val playerHtml = (if (connection.responseCode < 400) connection.inputStream else connection.errorStream).bufferedReader().readText()
-                                val jsonPattern = """var\s+video_sources\s*=\s*(\[[^;]+]);""".toRegex()
-                                val jsonMatch = jsonPattern.find(playerHtml)
+                                val responseBytes = (if (connection.responseCode < 400) connection.inputStream else connection.errorStream).readBytes()
+                                val jsonString = String(responseBytes, Charsets.UTF_8)
 
-                                if (jsonMatch != null) {
-                                    val jsonStr = jsonMatch.groupValues[1]
-                                    val linksFromJson = AppUtils.parseJson<List<Map<String, Any?>>>(jsonStr)
-                                    linksFromJson.forEach { item ->
-                                        var src = item["src"]?.toString() ?: item["file"]?.toString()
-                                        val label = item["label"]?.toString() ?: "Default"
-                                        
-                                        if (!src.isNullOrBlank()) {
-                                            if (src.contains("speed=133")) {
-                                                src = src.replace("speed=133", "speed=500")
-                                                if (!src.contains("&name=")) {
-                                                    src = "$src&name=
+                                val linksFromJson = AppUtils.parseJson<List<Map<String, Any?>>>(jsonString)
+                                linksFromJson.forEach { item ->
+                                    val src = item["src"]?.toString() ?: item["file"]?.toString()
+                                    val label = item["label"]?.toString() ?: "High Speed"
+                                    
+                                    if (!src.isNullOrBlank()) {
+                                        extractedRaw.add(src to label)
+                                    }
+                                }
+
+                                if (extractedRaw.isNotEmpty()) {
+                                    handler.post { finish() }
+                                }
+                            } catch (e: Exception) {}
+                        }.start()
+                    }
+                    return super.shouldInterceptRequest(view, request)
+                }
+            }
+
+            webView.loadUrl(url)
+        }
+    }
+
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val rawLinks = hijackAndExtractRaw(data)
+
+        if (rawLinks.isEmpty()) {
+            return false
+        }
+
+        rawLinks.forEach { (src, label) ->
+            try {
+                callback(
+                    newExtractorLink(
+                        source = this.name,
+                        name = "${this.name} $label",
+                        url = src,
+                        type = ExtractorLinkType.VIDEO
+                    ) {
+                        referer = "https://video.vid3rb.com/"
+                    }
+                )
+            } catch (e: Exception) {}
+        }
+        return true
+    }
+
+    private fun extractQuality(label: String): Int {
+        return Regex("""(\d{3,4})p""", RegexOption.IGNORE_CASE)
+            .find(label)
+            ?.groupValues
+            ?.get(1)
+            ?.toIntOrNull()
+            ?: Qualities.Unknown.value
+    }
+}
