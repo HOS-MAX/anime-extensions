@@ -210,14 +210,16 @@ class Anime3rb :
         val url = response.request.url.toString()
         val rawLinks = runOnUiThread { hijackAndExtractRawDirect(url) }
 
-        return rawLinks.map { (src, label) ->
+        val videoList = rawLinks.map { (src, label) ->
             Video(
                 src,
                 "Anime3rb - $label (🚀)",
                 src,
                 headers = headersBuilder().add("Referer", "https://video.vid3rb.com/").build(),
             )
-        }.sort() // يتم استدعاء دالة الترتيب البرمجية هنا بناءً على تفضيل جودة المستخدم
+        }
+        
+        return videoList.sortVideos() // تم تغيير اسم دالة الترتيب هنا لمنع التعارض البرمجي والخطأ
     }
 
     override fun videoListSelector() = throw UnsupportedOperationException()
@@ -272,7 +274,7 @@ class Anime3rb :
                                     val json = Json.parseToJsonElement(jsonString).jsonArray
                                     json.forEach { item ->
                                         val src = item.jsonObject["src"]?.jsonPrimitive?.content ?: item.jsonObject["file"]?.jsonPrimitive?.content
-                                        val label = item.jsonObject["label"]?.jsonPrimitive?.content ?: "720p" // السيرفر يرسل الجودة مثل 1080p أو 720p تلقائياً في خانة label
+                                        val label = item.jsonObject["label"]?.jsonPrimitive?.content ?: "720p"
                                         if (!src.isNullOrBlank()) {
                                             extractedRaw.add(src to label)
                                         }
@@ -337,7 +339,8 @@ class Anime3rb :
         }.also(screen::addPreference)
     }
 
-    private fun List<Video>.sort(): List<Video> {
+    // قمنا بتغيير اسم الامتداد من sort إلى sortVideos لتجنب أي تداخل مع الكود المدمج في مصفوفات الـ List
+    private fun List<Video>.sortVideos(): List<Video> {
         val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!
         return sortedWith(
             compareBy { it.quality.contains(quality) },
