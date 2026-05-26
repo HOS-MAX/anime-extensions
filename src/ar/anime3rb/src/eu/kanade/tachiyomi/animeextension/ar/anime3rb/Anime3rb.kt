@@ -63,15 +63,15 @@ class Anime3rb :
 
     private val context: Context by lazy { Injekt.get<Context>() }
 
-    private val preferences: SharedPreferences by getPreferencesLazy()
+    internal val preferences: SharedPreferences by getPreferencesLazy()
 
     companion object {
         private var savedCookies: String = ""
         private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
-        private const val PREF_QUALITY_KEY = "preferred_quality"
+        internal const val PREF_QUALITY_KEY = "preferred_quality"
         private const val PREF_QUALITY_TITLE = "Preferred quality"
-        private const val PREF_QUALITY_DEFAULT = "720p"
+        internal const val PREF_QUALITY_DEFAULT = "720p"
         private val PREF_QUALITY_ENTRIES = arrayOf("1080p", "720p", "480p", "360p", "240p")
     }
 
@@ -210,20 +210,14 @@ class Anime3rb :
         val url = response.request.url.toString()
         val rawLinks = runOnUiThread { hijackAndExtractRawDirect(url) }
 
-        val videoList = rawLinks.map { (src, label) ->
+        return rawLinks.map { (src, label) ->
             Video(
                 src,
                 "Anime3rb - $label (🚀)",
                 src,
                 headers = headersBuilder().add("Referer", "https://video.vid3rb.com/").build(),
             )
-        }
-
-        // نقوم بعمل الترتيب هنا مباشرة باستخدام خيارات المستخدم لمنع التداخل والتعارض
-        val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!
-        return videoList.sortedWith(
-            compareBy { it.quality.contains(quality) },
-        ).reversed()
+        }.sort() // استدعاء ميزة الترتيب الممتدة بالأسفل خارج الكلاس
     }
 
     override fun videoListSelector() = throw UnsupportedOperationException()
@@ -342,4 +336,12 @@ class Anime3rb :
             }
         }.also(screen::addPreference)
     }
+}
+
+// ============================= تمديد خارجي لمنع التضارب نهائياً ==============================
+override fun List<Video>.sort(): List<Video> {
+    val quality = preferences.getString(Anime3rb.PREF_QUALITY_KEY, Anime3rb.PREF_QUALITY_DEFAULT)!!
+    return sortedWith(
+        compareBy { it.quality.contains(quality) },
+    ).reversed()
 }
