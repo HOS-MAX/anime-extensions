@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.Dialog
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
@@ -16,6 +17,9 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.preference.ListPreference
+import androidx.preference.PreferenceScreen
+import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.SAnime
@@ -24,6 +28,8 @@ import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.utils.getPreferencesLazy
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -43,7 +49,9 @@ import java.net.URL
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
-class Anime3rb : ParsedAnimeHttpSource() {
+class Anime3rb :
+    ParsedAnimeHttpSource(),
+    ConfigurableAnimeSource {
 
     override val name = "Anime3rb"
 
@@ -53,11 +61,18 @@ class Anime3rb : ParsedAnimeHttpSource() {
 
     override val supportsLatest = true
 
-    private val context: Context = Injekt.get()
+    private val context: Context by lazy { Injekt.get<Context>() }
+
+    private val preferences: SharedPreferences by getPreferencesLazy()
 
     companion object {
         private var savedCookies: String = ""
         private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+
+        private const val PREF_QUALITY_KEY = "preferred_quality"
+        private const val PREF_QUALITY_TITLE = "Preferred quality"
+        private const val PREF_QUALITY_DEFAULT = "720p"
+        private val PREF_QUALITY_ENTRIES = arrayOf("1080p", "720p", "480p", "360p", "240p")
     }
 
     override fun headersBuilder(): Headers.Builder {
@@ -66,20 +81,19 @@ class Anime3rb : ParsedAnimeHttpSource() {
             .add("Referer", "$baseUrl/")
     }
 
-    // ========== الرئيسية (Popular / Latest) ==========
+    // ============================== الرئيسية ==============================
 
     override fun popularAnimeRequest(page: Int) = GET("$baseUrl/", headers)
 
-    override fun popularAnimeSelector() = "h2:contains(الأنميات المثبتة)")
-        .firstOrNull()?.parent()?.parent()?.parent()
-        ?.select(".glide__slide:not(.glide__slide--clone) a.video-card")
-        .toString()
+    override fun popularAnimeSelector() = "h2:contains(الأنميات المثبتة)"
 
     override fun popularAnimeFromElement(element: Element): SAnime {
+        val nextParent = element.parent()?.parent()?.parent()
+        val card = nextParent?.selectFirst("a.video-card")
         return SAnime.create().apply {
-            title = cleanTitleText(element.select("h3.title-name").text())
-            setUrlWithoutDomain(element.attr("href"))
-            thumbnail_url = element.select("img").attr("src")
+            title = cleanTitleText(card?.select("h3.title-name")?.text().orEmpty())
+            setUrlWithoutDomain(card?.attr("href").orEmpty())
+            thumbnail_url = card?.select("img")?.attr("src").orEmpty()
         }
     }
 
@@ -89,16 +103,21 @@ class Anime3rb : ParsedAnimeHttpSource() {
 
     override fun latestUpdatesSelector() = "#videos a.video-card"
 
-    override fun latestUpdatesFromElement(element: Element) = popularAnimeFromElement(element)
+    override fun latestUpdatesFromElement(element: Element): SAnime {
+        return SAnime.create().apply {
+            title = cleanTitleText(element.select("h3.title-name").text())
+            setUrlWithoutDomain(element.attr("href"))
+            thumbnail_url = element.select("img").attr("src")
+        }
+    }
 
     override fun latestUpdatesNextPageSelector(): String? = null
 
-    // ========== البحث (Search) ==========
+    // ============================== البحث ==============================
 
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): okhttp3.Request {
-        // نستخدم آليتك الذكية لجلب الكومبوننت والتوكن من الصفحة الأساسية لتشغيل الـ Livewire بنجاح
-        val client = client.newCall(GET(baseUrl, headers)).execute()
-        val doc = Jsoup.parse(client.body.string())
+        val clientResponse = client.newCall(GET(baseUrl, headers)).execute()
+        val doc = clientResponse.asJsoup()
         val scriptTag = doc.selectFirst("script[src*=livewire.min.js]")
         val csrfToken = scriptTag?.attr("data-csrf") ?: ""
         val form = doc.selectFirst("form[wire:id]")
@@ -118,7 +137,7 @@ class Anime3rb : ParsedAnimeHttpSource() {
                 "_token": "$csrfToken",
                 "components": [
                     {
-                        "snapshot": ${Json.parseToJsonElement(snapshotStr)},
+                        "snapshot": $snapshotStr,
                         "updates": {"query": "$query"},
                         "calls": []
                     }
@@ -152,7 +171,7 @@ class Anime3rb : ParsedAnimeHttpSource() {
     override fun searchAnimeFromElement(element: Element) = throw UnsupportedOperationException()
     override fun searchAnimeNextPageSelector() = throw UnsupportedOperationException()
 
-    // ========== تفاصيل الأنمي (Anime Details) ==========
+    // ============================== التفاصيل ==============================
 
     override fun animeDetailsParse(document: Document): SAnime {
         return SAnime.create().apply {
@@ -164,7 +183,7 @@ class Anime3rb : ParsedAnimeHttpSource() {
         }
     }
 
-    // ========== الحلقات (Episodes) ==========
+    // ============================== الحلقات ==============================
 
     override fun episodeListSelector() = ".video-list a, .episodes-list a"
 
@@ -173,7 +192,7 @@ class Anime3rb : ParsedAnimeHttpSource() {
             val videoData = element.selectFirst(".video-data")
             val epText = cleanTitleText(videoData?.selectFirst("span")?.text() ?: element.text())
             val epNum = epText.filter { it.isDigit() }.toFloatOrNull() ?: 1f
-            
+
             setUrlWithoutDomain(element.attr("href"))
             name = epText
             episode_number = epNum
@@ -181,26 +200,31 @@ class Anime3rb : ParsedAnimeHttpSource() {
     }
 
     override fun episodeListParse(response: Response): List<SEpisode> {
-        val doc = Jsoup.parse(response.body.string())
+        val doc = response.asJsoup()
         return doc.select(episodeListSelector()).map { episodeFromElement(it) }.reversed()
     }
 
-    // ========== جلب الروابط مباشرة من سيرفر التحميل السريع (Video Extractor) ==========
+    // ============================== جلب الروابط السريعة المباشرة ==============================
 
     override fun videoListParse(response: Response): List<Video> {
         val url = response.request.url.toString()
         val rawLinks = runOnUiThread { hijackAndExtractRawDirect(url) }
 
         return rawLinks.map { (src, label) ->
-            Video(src, "Anime3rb - $label", src, headers = headersBuilder().add("Referer", "https://video.vid3rb.com/").build())
-        }
+            Video(
+                src,
+                "Anime3rb - $label (🚀)",
+                src,
+                headers = headersBuilder().add("Referer", "https://video.vid3rb.com/").build(),
+            )
+        }.sort() // يتم استدعاء دالة الترتيب البرمجية هنا بناءً على تفضيل جودة المستخدم
     }
 
     override fun videoListSelector() = throw UnsupportedOperationException()
     override fun videoFromElement(element: Element) = throw UnsupportedOperationException()
     override fun videoUrlParse(document: Document) = throw UnsupportedOperationException()
 
-    // ========== WebView Interceptor لصفحة التحميل المباشر الأصلي ==========
+    // ============================== الاستخلاص عبر الـ WebView ==============================
 
     private fun hijackAndExtractRawDirect(url: String): List<Pair<String, String>> {
         return suspendCoroutine { cont ->
@@ -223,7 +247,6 @@ class Anime3rb : ParsedAnimeHttpSource() {
                     cont.resume(extractedRaw.distinctBy { it.first })
                 }
 
-                // إلغاء المهلة الطويلة لإنهاء العملية بسرعة فور التقاط الرابط السريع
                 Handler(Looper.getMainLooper()).postDelayed({ finish() }, 20000)
 
                 webView.webViewClient = object : WebViewClient() {
@@ -233,7 +256,6 @@ class Anime3rb : ParsedAnimeHttpSource() {
                     override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                         val reqUrl = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
 
-                        // يتم اقتناص ملف الـ /sources الخاص بسيرفر التحميل عالي السرعة (Speed=500) مباشرة وتجاهل الـ Player البطيء
                         if (reqUrl.contains("/sources") && reqUrl.contains("cf_token=")) {
                             Thread {
                                 try {
@@ -250,7 +272,7 @@ class Anime3rb : ParsedAnimeHttpSource() {
                                     val json = Json.parseToJsonElement(jsonString).jsonArray
                                     json.forEach { item ->
                                         val src = item.jsonObject["src"]?.jsonPrimitive?.content ?: item.jsonObject["file"]?.jsonPrimitive?.content
-                                        val label = item.jsonObject["label"]?.jsonPrimitive?.content ?: "Direct High Speed"
+                                        val label = item.jsonObject["label"]?.jsonPrimitive?.content ?: "720p" // السيرفر يرسل الجودة مثل 1080p أو 720p تلقائياً في خانة label
                                         if (!src.isNullOrBlank()) {
                                             extractedRaw.add(src to label)
                                         }
@@ -270,24 +292,21 @@ class Anime3rb : ParsedAnimeHttpSource() {
         }
     }
 
-    // ========== أدوات مساعدة ==========
-
     private fun <T> runOnUiThread(block: suspend () -> T): T {
-        return if (Looper.myLooper() == Looper.getMainLooper()) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
             throw IllegalStateException("Cannot run architecture network block directly on Main Thread")
-        } else {
-            var result: T? = null
-            var error: Throwable? = null
-            val latch = java.util.concurrent.CountDownLatch(1)
-            Handler(Looper.getMainLooper()).post {
-                kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
-                    try { result = block() } catch (e: Throwable) { error = e } finally { latch.countDown() }
-                }
-            }
-            latch.await()
-            error?.let { throw it }
-            result!!
         }
+        var result: T? = null
+        var error: Throwable? = null
+        val latch = java.util.concurrent.CountDownLatch(1)
+        Handler(Looper.getMainLooper()).post {
+            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                try { result = block() } catch (e: Throwable) { error = e } finally { latch.countDown() }
+            }
+        }
+        latch.await()
+        error?.let { throw it }
+        return result!!
     }
 
     private fun cleanTitleText(text: String): String {
@@ -296,5 +315,32 @@ class Anime3rb : ParsedAnimeHttpSource() {
             .replace(Regex("بترجمة.*"), "")
             .replace(Regex("\\s+"), " ")
             .trim()
+    }
+
+    // ============================= الإعدادات والترتيب الخارجي ==============================
+
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        ListPreference(screen.context).apply {
+            key = PREF_QUALITY_KEY
+            title = PREF_QUALITY_TITLE
+            entries = PREF_QUALITY_ENTRIES
+            entryValues = PREF_QUALITY_ENTRIES
+            setDefaultValue(PREF_QUALITY_DEFAULT)
+            summary = "%s"
+
+            setOnPreferenceChangeListener { _, newValue ->
+                val selected = newValue as String
+                val index = findIndexOfValue(selected)
+                val entry = entryValues[index] as String
+                preferences.edit().putString(key, entry).commit()
+            }
+        }.also(screen::addPreference)
+    }
+
+    private fun List<Video>.sort(): List<Video> {
+        val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!
+        return sortedWith(
+            compareBy { it.quality.contains(quality) },
+        ).reversed()
     }
 }
