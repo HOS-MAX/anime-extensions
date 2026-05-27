@@ -14,6 +14,7 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.getPreferencesLazy
+import android.webkit.CookieManager
 import okhttp3.Headers
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -40,11 +41,18 @@ class Anime3rb :
 
     private val preferences by getPreferencesLazy()
 
+    // Dynamically retrieve stored System WebView Session Cookies synchronized by Aniyomi
+    private fun getSystemCookies(url: String): String {
+        return try {
+            CookieManager.getInstance().getCookie(url) ?: ""
+        } catch (_: Exception) { "" }
+    }
+
     override fun headersBuilder() = Headers.Builder()
         .add("User-Agent", USER_AGENT)
         .add("Referer", "$baseUrl/")
         .add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-        .add("Accept-Language", "en-US,en;q=0.5")
+        .add("Accept-Language", "ar,en-US;q=0.7,en;q=0.3")
 
     // ============================== Popular ===============================
     override fun popularAnimeRequest(page: Int) = GET("$baseUrl/", headers)
@@ -176,29 +184,31 @@ class Anime3rb :
         }
     }
 
-    // ============================ Video Links (Fixed & Rewritten) =============================
+    // ============================ Video Links (The Turnstile Fix) =============================
     override fun videoListParse(response: Response): List<Video> {
         val document = response.asJsoup()
         val videoList = mutableListOf<Video>()
 
-        // Find standard embedded iframe containers 
+        // 1. Identify dynamic iframe components containing the player tokens
         val playerElements = document.select("iframe[src*=/player/], iframe[src*=/sources], iframe[src*=vid3rb]")
 
         playerElements.forEach { iframe ->
             try {
                 val playerUrl = iframe.attr("abs:src")
+                val cookieStr = getSystemCookies(playerUrl) // Pull system verified tokens
                 
                 val playerHeaders = headersBuilder()
                     .set("Referer", "$baseUrl/")
+                    .set("Cookie", cookieStr) // Explicitly forward clearance cookies
                     .build()
                 
                 val playerResponse = client.newCall(GET(playerUrl, playerHeaders)).execute()
                 val playerHtml = playerResponse.body.string()
 
-                // Strategy A: Parse standard embedded configuration payloads inside script tags
+                // Strategy A: Evaluate internal JavaScript config maps
                 videoList.addAll(extractSourcesFromScript(playerHtml))
                 
-                // Strategy B: Fallback parsing to look for clean direct watch API queries when cookies match
+                // Strategy B: Pull direct fallback backend schema if scripts are scrambled
                 if (videoList.isEmpty() && playerUrl.contains("/player/")) {
                     val id = playerUrl.substringAfter("/player/").substringBefore("?")
                     val apiUrl = "$baseUrl/api/video/$id"
@@ -210,7 +220,7 @@ class Anime3rb :
             } catch (_: Exception) {}
         }
 
-        // Strategy C: Absolute global canvas scanning if written directly to the primary wrapper layout
+        // Strategy C: Scrape root body layouts directly
         if (videoList.isEmpty()) {
             videoList.addAll(extractSourcesFromScript(document.select("script").html()))
         }
@@ -221,7 +231,7 @@ class Anime3rb :
     private fun extractSourcesFromScript(html: String): List<Video> {
         val videos = mutableListOf<Video>()
         try {
-            // Target the JSON configuration blocks containing files or streaming links
+            // Updated regex pattern to intercept raw array streams safely
             val jsonRegex = """(?:var\s+video_sources\s*=\s*|sources:\s*)(\[[^;\]\n]+])""".toRegex()
             val match = jsonRegex.find(html)
             
@@ -237,13 +247,13 @@ class Anime3rb :
                     val label = if (item.has("label")) item.getString("label") else "Direct Server"
                     
                     if (src.isNotBlank()) {
-                        // Crucial fix: Attach the required stream and player references to make download/playback succeed
+                        // Crucial fix: Attach the verified referer data so watch/download links stream natively
                         val videoHeaders = headersBuilder()
                             .set("Referer", "https://video.vid3rb.com/")
                             .set("Origin", "https://video.vid3rb.com")
                             .build()
                             
-                        videos.add(Video(src, "Anim3rb - $label (Watch/Download)", src, videoHeaders))
+                        videos.add(Video(src, "Anim3rb - $label", src, videoHeaders))
                     }
                 }
             }
