@@ -14,6 +14,7 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.getPreferencesLazy
+import okhttp3.Headers
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
@@ -39,9 +40,11 @@ class Anime3rb :
 
     private val preferences by getPreferencesLazy()
 
-    override fun headersBuilder() = super.headersBuilder()
+    override fun headersBuilder() = Headers.Builder()
         .add("User-Agent", USER_AGENT)
         .add("Referer", "$baseUrl/")
+        .add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+        .add("Accept-Language", "en-US,en;q=0.5")
 
     // ============================== Popular ===============================
     override fun popularAnimeRequest(page: Int) = GET("$baseUrl/", headers)
@@ -113,9 +116,9 @@ class Anime3rb :
         }
 
         val searchHeaders = headersBuilder()
-            .add("Accept", "*/*")
-            .add("Content-Type", "application/json")
-            .add("Origin", baseUrl)
+            .set("Accept", "*/*")
+            .set("Content-Type", "application/json")
+            .set("Origin", baseUrl)
             .build()
 
         val requestBody = payload.toString().toRequestBody("application/json".toMediaType())
@@ -173,32 +176,41 @@ class Anime3rb :
         }
     }
 
-    // ============================ Video Links (The Fixed Section) =============================
+    // ============================ Video Links (Fixed & Rewritten) =============================
     override fun videoListParse(response: Response): List<Video> {
         val document = response.asJsoup()
         val videoList = mutableListOf<Video>()
 
-        // Step 1: Just like AnimeBlkom parses the embedding server links, we find the iframes on the watch page
+        // Find standard embedded iframe containers 
         val playerElements = document.select("iframe[src*=/player/], iframe[src*=/sources], iframe[src*=vid3rb]")
 
         playerElements.forEach { iframe ->
             try {
                 val playerUrl = iframe.attr("abs:src")
                 
-                // Step 2: Make the server call synchronously using OkHttp client
                 val playerHeaders = headersBuilder()
-                    .add("Referer", "$baseUrl/")
+                    .set("Referer", "$baseUrl/")
                     .build()
                 
                 val playerResponse = client.newCall(GET(playerUrl, playerHeaders)).execute()
                 val playerHtml = playerResponse.body.string()
 
-                // Step 3: Match the global JavaScript object configuration variable containing direct streams
+                // Strategy A: Parse standard embedded configuration payloads inside script tags
                 videoList.addAll(extractSourcesFromScript(playerHtml))
+                
+                // Strategy B: Fallback parsing to look for clean direct watch API queries when cookies match
+                if (videoList.isEmpty() && playerUrl.contains("/player/")) {
+                    val id = playerUrl.substringAfter("/player/").substringBefore("?")
+                    val apiUrl = "$baseUrl/api/video/$id"
+                    val apiResponse = client.newCall(GET(apiUrl, playerHeaders)).execute()
+                    if (apiResponse.code == 200) {
+                        videoList.addAll(extractSourcesFromScript(apiResponse.body.string()))
+                    }
+                }
             } catch (_: Exception) {}
         }
 
-        // Step 4: Fallback mechanism in case the script block was printed straight to the core watch document context
+        // Strategy C: Absolute global canvas scanning if written directly to the primary wrapper layout
         if (videoList.isEmpty()) {
             videoList.addAll(extractSourcesFromScript(document.select("script").html()))
         }
@@ -209,24 +221,29 @@ class Anime3rb :
     private fun extractSourcesFromScript(html: String): List<Video> {
         val videos = mutableListOf<Video>()
         try {
-            // This Regex securely isolates the JSON initialization array used by Vid3rb servers
-            val jsonRegex = """var\s+video_sources\s*=\s*(\[[^;]+]);""".toRegex()
+            // Target the JSON configuration blocks containing files or streaming links
+            val jsonRegex = """(?:var\s+video_sources\s*=\s*|sources:\s*)(\[[^;\]\n]+])""".toRegex()
             val match = jsonRegex.find(html)
             
             if (match != null) {
                 val jsonArray = JSONArray(match.groupValues[1])
                 for (i in 0 until jsonArray.length()) {
                     val item = jsonArray.getJSONObject(i)
-                    val src = if (item.has("src")) item.getString("src") else item.getString("file")
+                    val src = when {
+                        item.has("src") -> item.getString("src")
+                        item.has("file") -> item.getString("file")
+                        else -> ""
+                    }
                     val label = if (item.has("label")) item.getString("label") else "Direct Server"
                     
                     if (src.isNotBlank()) {
-                        // Crucial: Set the strict Origin Referer token parameters required by files.vid3rb.com
+                        // Crucial fix: Attach the required stream and player references to make download/playback succeed
                         val videoHeaders = headersBuilder()
                             .set("Referer", "https://video.vid3rb.com/")
+                            .set("Origin", "https://video.vid3rb.com")
                             .build()
                             
-                        videos.add(Video(src, "Anim3rb - $label", src, videoHeaders))
+                        videos.add(Video(src, "Anim3rb - $label (Watch/Download)", src, videoHeaders))
                     }
                 }
             }
@@ -275,7 +292,7 @@ class Anime3rb :
 
     companion object {
         private const val PREF_QUALITY_KEY = "preferred_quality"
-        private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0"
         private val TITLE_EP_REGEX = Regex("الحلقة \\d+|( مسلسل )|( فيلم )")
     }
 }
