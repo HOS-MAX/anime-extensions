@@ -1,59 +1,36 @@
 package eu.kanade.tachiyomi.animeextension.ar.anime3rb
 
-import android.annotation.SuppressLint
-import android.app.Activity
-import android.app.Dialog
-import android.content.Context
-import android.content.SharedPreferences
-import android.os.Handler
-import android.os.Looper
-import android.view.Gravity
-import android.view.ViewGroup
-import android.view.Window
-import android.view.WindowManager
-import android.webkit.CookieManager
-import android.webkit.SslErrorHandler
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import android.app.Application
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
-import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.getPreferencesLazy
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import okhttp3.Headers
+import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import org.json.JSONArray
+import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
-import java.io.ByteArrayInputStream
-import java.net.HttpURLConnection
-import java.net.URL
-import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
 
 class Anime3rb :
     ParsedAnimeHttpSource(),
     ConfigurableAnimeSource {
 
-    override val name = "Anime3rb"
+    override val name = "Anim3rb"
 
     override val baseUrl = "https://anime3rb.com"
 
@@ -61,254 +38,240 @@ class Anime3rb :
 
     override val supportsLatest = true
 
-    private val context: Context by lazy { Injekt.get<Context>() }
+    private val preferences by getPreferencesLazy()
 
-    internal val preferences: SharedPreferences by getPreferencesLazy()
+    override fun headersBuilder() = super.headersBuilder()
+        .add("User-Agent", USER_AGENT)
+        .add("Referer", "$baseUrl/")
 
-    companion object {
-        private var savedCookies: String = ""
-        private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-
-        internal const val PREF_QUALITY_KEY = "preferred_quality"
-        private const val PREF_QUALITY_TITLE = "Preferred quality"
-        internal const val PREF_QUALITY_DEFAULT = "720p"
-        private val PREF_QUALITY_ENTRIES = arrayOf("1080p", "720p", "480p", "360p", "240p")
-    }
-
-    override fun headersBuilder(): Headers.Builder {
-        return Headers.Builder()
-            .add("User-Agent", USER_AGENT)
-            .add("Referer", "$baseUrl/")
-    }
-
-    // ============================== الرئيسية ==============================
-
+    // ============================== Popular ===============================
     override fun popularAnimeRequest(page: Int) = GET("$baseUrl/", headers)
 
-    override fun popularAnimeSelector() = "h2:contains(الأنميات المثبتة)"
+    override fun popularAnimeSelector() = "h3:contains(آخر الأنميات المضافة), h2:contains(الأنميات المثبتة)"
 
-    override fun popularAnimeFromElement(element: Element): SAnime {
-        val nextParent = element.parent()?.parent()?.parent()
-        val card = nextParent?.selectFirst("a.video-card")
-        return SAnime.create().apply {
-            title = cleanTitleText(card?.select("h3.title-name")?.text().orEmpty())
-            setUrlWithoutDomain(card?.attr("href").orEmpty())
-            thumbnail_url = card?.select("img")?.attr("src").orEmpty()
+    override fun popularAnimeFromElement(element: Element): SAnime = throw UnsupportedOperationException()
+
+    override fun popularAnimeParse(response: Response): eu.kanade.tachiyomi.animesource.model.AnimesPage {
+        val document = response.asJsoup()
+        val animeList = mutableListOf<SAnime>()
+        
+        document.select(".glide__slide:not(.glide__slide--clone) a.video-card, #videos a.video-card").forEach { el ->
+            val anime = SAnime.create().apply {
+                title = cleanTitleText(el.select("h3.title-name").text())
+                thumbnail_url = el.select("img").attr("abs:src")
+                setUrlWithoutDomain(el.attr("href"))
+            }
+            if (animeList.none { it.url == anime.url }) animeList.add(anime)
         }
+        
+        return eu.kanade.tachiyomi.animesource.model.AnimesPage(animeList, false)
     }
 
     override fun popularAnimeNextPageSelector(): String? = null
 
-    override fun latestUpdatesRequest(page: Int) = GET("$baseUrl/", headers)
+    // =============================== Latest ===============================
+    override fun latestUpdatesRequest(page: Int) = popularAnimeRequest(page)
 
-    override fun latestUpdatesSelector() = "#videos a.video-card"
+    override fun latestUpdatesParse(response: Response) = popularAnimeParse(response)
 
-    override fun latestUpdatesFromElement(element: Element): SAnime {
-        return SAnime.create().apply {
-            title = cleanTitleText(element.select("h3.title-name").text())
-            setUrlWithoutDomain(element.attr("href"))
-            thumbnail_url = element.select("img").attr("src")
+    override fun latestUpdatesSelector() = popularAnimeSelector()
+
+    override fun latestUpdatesFromElement(element: Element) = popularAnimeFromElement(element)
+
+    override fun latestUpdatesNextPageSelector() = popularAnimeNextPageSelector()
+
+    // =============================== Search ===============================
+    override fun searchAnimeFromElement(element: Element): SAnime = throw UnsupportedOperationException()
+
+    override fun searchAnimeNextPageSelector(): String? = null
+
+    override fun searchAnimeSelector(): String = throw UnsupportedOperationException()
+
+    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList) = popularAnimeRequest(page)
+
+    override fun searchAnimeParse(response: Response): eu.kanade.tachiyomi.animesource.model.AnimesPage {
+        val mainDoc = response.asJsoup()
+        val query = mainDoc.location().substringAfter("?query=", "")
+        
+        if (query.isBlank()) return popularAnimeParse(response)
+
+        val scriptTag = mainDoc.selectFirst("script[src*=livewire.min.js]") ?: return eu.kanade.tachiyomi.animesource.model.AnimesPage(emptyList(), false)
+        val csrfToken = scriptTag.attr("data-csrf")
+        val form = mainDoc.selectFirst("form[wire:id]") ?: return eu.kanade.tachiyomi.animesource.model.AnimesPage(emptyList(), false)
+        val snapshotStr = form.attr("wire:snapshot")
+
+        val updateUrl = "$baseUrl/livewire/update"
+        
+        val payload = JSONObject().apply {
+            put("_token", csrfToken)
+            put("components", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("snapshot", snapshotStr)
+                    put("updates", JSONObject().apply { put("query", query) })
+                    put("calls", JSONArray())
+                })
+            })
         }
-    }
 
-    override fun latestUpdatesNextPageSelector(): String? = null
-
-    // ============================== البحث ==============================
-
-    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): okhttp3.Request {
-        val clientResponse = client.newCall(GET(baseUrl, headers)).execute()
-        val doc = clientResponse.asJsoup()
-        val scriptTag = doc.selectFirst("script[src*=livewire.min.js]")
-        val csrfToken = scriptTag?.attr("data-csrf") ?: ""
-        val form = doc.selectFirst("form[wire:id]")
-        val snapshotRaw = form?.attr("wire:snapshot") ?: ""
-        val snapshotStr = org.jsoup.parser.Parser.unescapeEntities(snapshotRaw, true)
-
-        val livewireHeaders = headersBuilder()
+        val searchHeaders = headersBuilder()
             .add("Accept", "*/*")
             .add("Content-Type", "application/json")
             .add("Origin", baseUrl)
-            .add("Referer", "$baseUrl/")
-            .add("Cookie", savedCookies)
             .build()
 
-        val jsonPayload = """
-            {
-                "_token": "$csrfToken",
-                "components": [
-                    {
-                        "snapshot": $snapshotStr,
-                        "updates": {"query": "$query"},
-                        "calls": []
-                    }
-                ]
-            }
-        """.trimIndent()
+        val requestBody = payload.toString().toRequestBody("application/json".toMediaType())
+        val postRes = client.newCall(POST(updateUrl, searchHeaders, requestBody)).execute()
+        
+        if (postRes.code != 200) return eu.kanade.tachiyomi.animesource.model.AnimesPage(emptyList(), false)
 
-        val body = jsonPayload.toRequestBody("application/json".toMediaType())
-        return POST("$baseUrl/livewire/update", livewireHeaders, body)
-    }
+        val responseJson = JSONObject(postRes.body.string())
+        val components = responseJson.getJSONArray("components")
+        val effects = components.getJSONObject(0).getJSONObject("effects")
+        val htmlContent = effects.getString("html")
 
-    override fun searchAnimeParse(response: Response): AnimesPage {
-        val responseText = response.body.string()
-        val json = Json.parseToJsonElement(responseText).jsonObject
-        val components = json["components"]?.jsonArray ?: return AnimesPage(emptyList(), false)
-        val effects = components.firstOrNull()?.jsonObject?.get("effects")?.jsonObject ?: return AnimesPage(emptyList(), false)
-        val htmlContent = effects["html"]?.jsonPrimitive?.content ?: return AnimesPage(emptyList(), false)
-
-        val doc = Jsoup.parse(htmlContent)
-        val animeList = doc.select("a.simple-title-card").map { item ->
+        val soupResults = Jsoup.parse(htmlContent)
+        val animeList = soupResults.select("a.simple-title-card").map { item ->
             SAnime.create().apply {
                 title = cleanTitleText(item.selectFirst("h4")?.text() ?: "")
+                thumbnail_url = item.selectFirst("img")?.attr("abs:src")
                 setUrlWithoutDomain(item.attr("href"))
-                thumbnail_url = item.selectFirst("img")?.attr("src")
             }
         }
-        return AnimesPage(animeList, false)
+
+        return eu.kanade.tachiyomi.animesource.model.AnimesPage(animeList, false)
     }
 
-    override fun searchAnimeSelector() = throw UnsupportedOperationException()
-    override fun searchAnimeFromElement(element: Element) = throw UnsupportedOperationException()
-    override fun searchAnimeNextPageSelector() = throw UnsupportedOperationException()
-
-    // ============================== التفاصيل ==============================
-
-    override fun animeDetailsParse(document: Document): SAnime {
-        return SAnime.create().apply {
-            val rawTitle = document.selectFirst("h1")?.text() ?: ""
-            title = cleanTitleText(rawTitle).replace(Regex("الحلقة \\d+"), "").trim()
-            thumbnail_url = document.selectFirst("img[alt*='بوستر']")?.attr("src")
-            genre = document.select("div.genres a").joinToString(", ") { it.text() }
-            description = document.select("div.py-4.flex.flex-col.gap-2 p, p.synopsis").joinToString("\n") { it.text().trim() }
-        }
+    // =========================== Anime Details ============================
+    override fun animeDetailsParse(document: Document) = SAnime.create().apply {
+        val rawTitle = document.selectFirst("h1")?.text() ?: ""
+        title = cleanTitleText(rawTitle).replace(TITLE_EP_REGEX, "").trim()
+        thumbnail_url = document.selectFirst("img[alt*='بوستر']")?.attr("abs:src")
+        description = document.select("div.py-4.flex.flex-col.gap-2 p, p.synopsis").joinToString("\n") { it.text().trim() }
+        status = SAnime.UNKNOWN
     }
 
-    // ============================== الحلقات ==============================
-
+    // ============================== Episodes ==============================
     override fun episodeListSelector() = ".video-list a, .episodes-list a"
 
-    override fun episodeFromElement(element: Element): SEpisode {
-        return SEpisode.create().apply {
-            val videoData = element.selectFirst(".video-data")
-            val epText = cleanTitleText(videoData?.selectFirst("span")?.text() ?: element.text())
-            val epNum = epText.filter { it.isDigit() }.toFloatOrNull() ?: 1f
-
-            setUrlWithoutDomain(element.attr("href"))
-            name = epText
-            episode_number = epNum
-        }
+    override fun episodeFromElement(element: Element) = SEpisode.create().apply {
+        setUrlWithoutDomain(element.attr("href"))
+        val videoData = element.selectFirst(".video-data")
+        val epText = cleanTitleText(videoData?.selectFirst("span")?.text() ?: videoData?.children()?.getOrNull(0)?.text() ?: "")
+        val epNum = epText.filter { it.isDigit() }.toFloatOrNull()
+        
+        episode_number = epNum ?: 1F
+        val epName = cleanTitleText(videoData?.selectFirst("p")?.text() ?: videoData?.children()?.getOrNull(1)?.text() ?: "")
+        name = if (epName.isNotBlank()) epName else epText
     }
 
     override fun episodeListParse(response: Response): List<SEpisode> {
-        val doc = response.asJsoup()
-        return doc.select(episodeListSelector()).map { episodeFromElement(it) }.reversed()
+        val document = response.asJsoup()
+        val episodes = document.select(episodeListSelector()).map(::episodeFromElement)
+        return if (episodes.size > 1 && (episodes.first().episode_number > episodes.last().episode_number)) {
+            episodes.reversed()
+        } else {
+            episodes
+        }
     }
 
-    // ============================== جلب الروابط وتطبيق الترتيب تلقائياً ==============================
-
+    // ============================ Video Links =============================
     override fun videoListParse(response: Response): List<Video> {
-        val url = response.request.url.toString()
-        val rawLinks = runOnUiThread { hijackAndExtractRawDirect(url) }
+        val document = response.asJsoup()
+        
+        // Target alternative direct server players inside the page or iframes
+        val playerElements = document.select("iframe[src*=/player/], iframe[src*=/sources]")
+        val videoList = mutableListOf<Video>()
 
-        return rawLinks.map { (src, label) ->
-            Video(
-                src,
-                "Anime3rb - $label (🚀)",
-                src,
-                headers = headersBuilder().add("Referer", "https://video.vid3rb.com/").build(),
-            )
-        }.sort() // استدعاء ميزة الترتيب الممتدة بالأسفل خارج الكلاس
+        if (playerElements.isNotEmpty()) {
+            playerElements.forEach { iframe ->
+                val srcUrl = iframe.attr("abs:src")
+                videoList.addAll(extractDirectVideosFromPlayer(srcUrl))
+            }
+        } else {
+            // Fallback scraping alternative match configuration inside inline scripts
+            val scripts = document.select("script").html()
+            if (scripts.contains("video_sources")) {
+                videoList.addAll(parseInlineJsonSources(scripts))
+            }
+        }
+        
+        return videoList
     }
 
-    override fun videoListSelector() = throw UnsupportedOperationException()
-    override fun videoFromElement(element: Element) = throw UnsupportedOperationException()
-    override fun videoUrlParse(document: Document) = throw UnsupportedOperationException()
+    private fun extractDirectVideosFromPlayer(playerUrl: String): List<Video> {
+        val videoList = mutableListOf<Video>()
+        try {
+            val playerHeaders = headersBuilder()
+                .add("Referer", baseUrl)
+                .build()
+                
+            val response = client.newCall(GET(playerUrl, playerHeaders)).execute()
+            val html = response.body.string()
+            
+            if (html.contains("video_sources")) {
+                videoList.addAll(parseInlineJsonSources(html))
+            }
+        } catch (_: Exception) {}
+        return videoList
+    }
 
-    // ============================== الاستخلاص عبر الـ WebView ==============================
-
-    private fun hijackAndExtractRawDirect(url: String): List<Pair<String, String>> {
-        return suspendCoroutine { cont ->
-            Handler(Looper.getMainLooper()).post {
-                val webView = WebView(context)
-                webView.settings.apply {
-                    javaScriptEnabled = true
-                    domStorageEnabled = true
-                    userAgentString = USER_AGENT
-                }
-                CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
-
-                val extractedRaw = mutableListOf<Pair<String, String>>()
-                var isDone = false
-
-                fun finish() {
-                    if (isDone) return
-                    isDone = true
-                    try { webView.destroy() } catch (_: Exception) {}
-                    cont.resume(extractedRaw.distinctBy { it.first })
-                }
-
-                Handler(Looper.getMainLooper()).postDelayed({ finish() }, 20000)
-
-                webView.webViewClient = object : WebViewClient() {
-                    @SuppressLint("WebViewClientOnReceivedSslError")
-                    override fun onReceivedSslError(v: WebView?, h: SslErrorHandler?, e: android.net.http.SslError?) = h!!.proceed()
-
-                    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                        val reqUrl = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
-
-                        if (reqUrl.contains("/sources") && reqUrl.contains("cf_token=")) {
-                            Thread {
-                                try {
-                                    val connection = URL(reqUrl).openConnection() as HttpURLConnection
-                                    connection.requestMethod = "GET"
-                                    request.requestHeaders?.forEach { (k, v) ->
-                                        if (!k.equals("Accept-Encoding", true)) connection.setRequestProperty(k, v)
-                                    }
-                                    CookieManager.getInstance().getCookie(reqUrl)?.let { connection.setRequestProperty("Cookie", it) }
-
-                                    val responseBytes = (if (connection.responseCode < 400) connection.inputStream else connection.errorStream).readBytes()
-                                    val jsonString = String(responseBytes, Charsets.UTF_8)
-
-                                    val json = Json.parseToJsonElement(jsonString).jsonArray
-                                    json.forEach { item ->
-                                        val src = item.jsonObject["src"]?.jsonPrimitive?.content ?: item.jsonObject["file"]?.jsonPrimitive?.content
-                                        val label = item.jsonObject["label"]?.jsonPrimitive?.content ?: "720p"
-                                        if (!src.isNullOrBlank()) {
-                                            extractedRaw.add(src to label)
-                                        }
-                                    }
-
-                                    if (extractedRaw.isNotEmpty()) {
-                                        Handler(Looper.getMainLooper()).post { finish() }
-                                    }
-                                } catch (_: Exception) {}
-                            }.start()
-                        }
-                        return super.shouldInterceptRequest(view, request)
+    private fun parseInlineJsonSources(html: String): List<Video> {
+        val videoList = mutableListOf<Video>()
+        try {
+            val jsonPattern = """var\s+video_sources\s*=\s*(\[[^;]+]);""".toRegex()
+            val match = jsonPattern.find(html)
+            if (match != null) {
+                val jsonStr = match.groupValues[1]
+                val jsonArray = JSONArray(jsonStr)
+                for (i in 0 until jsonArray.length()) {
+                    val item = jsonArray.getJSONObject(i)
+                    val src = if (item.has("src")) item.getString("src") else item.getString("file")
+                    val label = if (item.has("label")) item.getString("label") else "Direct Server"
+                    
+                    if (src.isNotBlank()) {
+                        // Matching the explicit download link configurations provided 
+                        val videoHeaders = headersBuilder()
+                            .set("Referer", "https://video.vid3rb.com/")
+                            .build()
+                        videoList.add(Video(src, "Anim3rb - $label", src, videoHeaders))
                     }
                 }
-                webView.loadUrl(url)
             }
-        }
+        } catch (_: Exception) {}
+        return videoList
     }
 
-    private fun <T> runOnUiThread(block: suspend () -> T): T {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            throw IllegalStateException("Cannot run architecture network block directly on Main Thread")
-        }
-        var result: T? = null
-        var error: Throwable? = null
-        val latch = java.util.concurrent.CountDownLatch(1)
-        Handler(Looper.getMainLooper()).post {
-            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
-                try { result = block() } catch (e: Throwable) { error = e } finally { latch.countDown() }
+    override fun videoListSelector(): String = throw UnsupportedOperationException()
+    override fun videoFromElement(element: Element): Video = throw UnsupportedOperationException()
+    override fun videoUrlParse(document: Document): String = throw UnsupportedOperationException()
+
+    // ============================== Filters ===============================
+    override fun getFilterList() = AnimeFilterList()
+
+    // ============================== Settings ==============================
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        val qualityPref = ListPreference(screen.context).apply {
+            key = PREF_QUALITY_KEY
+            title = "Preferred quality"
+            entries = arrayOf("1080p", "720p", "480p", "360p")
+            entryValues = arrayOf("1080p", "720p", "480p", "360p")
+            setDefaultValue("720p")
+            summary = "%s"
+            setOnPreferenceChangeListener { _, newValue ->
+                preferences.edit().putString(PREF_QUALITY_KEY, newValue as String).commit()
             }
         }
-        latch.await()
-        error?.let { throw it }
-        return result!!
+        screen.addPreference(qualityPref)
     }
 
+    override fun List<Video>.sort(): List<Video> {
+        val quality = preferences.getString(PREF_QUALITY_KEY, "720p")!!
+        return sortedWith(
+            compareBy { it.quality.contains(quality) },
+        ).reversed()
+    }
+
+    // ============================= Utilities ==============================
     private fun cleanTitleText(text: String): String {
         return text.replace("\\n", " ")
             .replace("\n", " ")
@@ -317,31 +280,9 @@ class Anime3rb :
             .trim()
     }
 
-    // ============================= الإعدادات وشاشة التفضيلات ==============================
-
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        ListPreference(screen.context).apply {
-            key = PREF_QUALITY_KEY
-            title = PREF_QUALITY_TITLE
-            entries = PREF_QUALITY_ENTRIES
-            entryValues = PREF_QUALITY_ENTRIES
-            setDefaultValue(PREF_QUALITY_DEFAULT)
-            summary = "%s"
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val selected = newValue as String
-                val index = findIndexOfValue(selected)
-                val entry = entryValues[index] as String
-                preferences.edit().putString(key, entry).commit()
-            }
-        }.also(screen::addPreference)
+    companion object {
+        private const val PREF_QUALITY_KEY = "preferred_quality"
+        private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        private val TITLE_EP_REGEX = Regex("الحلقة \\d+|( مسلسل )|( فيلم )")
     }
-}
-
-// ============================= تمديد خارجي لمنع التضارب نهائياً ==============================
-override fun List<Video>.sort(): List<Video> {
-    val quality = preferences.getString(Anime3rb.PREF_QUALITY_KEY, Anime3rb.PREF_QUALITY_DEFAULT)!!
-    return sortedWith(
-        compareBy { it.quality.contains(quality) },
-    ).reversed()
 }
