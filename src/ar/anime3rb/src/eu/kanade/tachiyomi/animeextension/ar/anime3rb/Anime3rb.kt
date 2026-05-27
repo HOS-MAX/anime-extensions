@@ -5,16 +5,15 @@ import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
+import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
-import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.getPreferencesLazy
-import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
@@ -51,7 +50,7 @@ class Anime3rb :
 
     override fun popularAnimeFromElement(element: Element): SAnime = throw UnsupportedOperationException()
 
-    override fun popularAnimeParse(response: Response): eu.kanade.tachiyomi.animesource.model.AnimesPage {
+    override fun popularAnimeParse(response: Response): AnimesPage {
         val document = response.asJsoup()
         val animeList = mutableListOf<SAnime>()
         
@@ -64,7 +63,7 @@ class Anime3rb :
             if (animeList.none { it.url == anime.url }) animeList.add(anime)
         }
         
-        return eu.kanade.tachiyomi.animesource.model.AnimesPage(animeList, false)
+        return AnimesPage(animeList, false)
     }
 
     override fun popularAnimeNextPageSelector(): String? = null
@@ -89,15 +88,15 @@ class Anime3rb :
 
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList) = popularAnimeRequest(page)
 
-    override fun searchAnimeParse(response: Response): eu.kanade.tachiyomi.animesource.model.AnimesPage {
+    override fun searchAnimeParse(response: Response): AnimesPage {
         val mainDoc = response.asJsoup()
         val query = mainDoc.location().substringAfter("?query=", "")
         
         if (query.isBlank()) return popularAnimeParse(response)
 
-        val scriptTag = mainDoc.selectFirst("script[src*=livewire.min.js]") ?: return eu.kanade.tachiyomi.animesource.model.AnimesPage(emptyList(), false)
+        val scriptTag = mainDoc.selectFirst("script[src*=livewire.min.js]") ?: return AnimesPage(emptyList(), false)
         val csrfToken = scriptTag.attr("data-csrf")
-        val form = mainDoc.selectFirst("form[wire:id]") ?: return eu.kanade.tachiyomi.animesource.model.AnimesPage(emptyList(), false)
+        val form = mainDoc.selectFirst("form[wire:id]") ?: return AnimesPage(emptyList(), false)
         val snapshotStr = form.attr("wire:snapshot")
 
         val updateUrl = "$baseUrl/livewire/update"
@@ -122,7 +121,7 @@ class Anime3rb :
         val requestBody = payload.toString().toRequestBody("application/json".toMediaType())
         val postRes = client.newCall(POST(updateUrl, searchHeaders, requestBody)).execute()
         
-        if (postRes.code != 200) return eu.kanade.tachiyomi.animesource.model.AnimesPage(emptyList(), false)
+        if (postRes.code != 200) return AnimesPage(emptyList(), false)
 
         val responseJson = JSONObject(postRes.body.string())
         val components = responseJson.getJSONArray("components")
@@ -138,7 +137,7 @@ class Anime3rb :
             }
         }
 
-        return eu.kanade.tachiyomi.animesource.model.AnimesPage(animeList, false)
+        return AnimesPage(animeList, false)
     }
 
     // =========================== Anime Details ============================
@@ -174,71 +173,65 @@ class Anime3rb :
         }
     }
 
-    // ============================ Video Links =============================
+    // ============================ Video Links (The Fixed Section) =============================
     override fun videoListParse(response: Response): List<Video> {
         val document = response.asJsoup()
-        
-        // Target alternative direct server players inside the page or iframes
-        val playerElements = document.select("iframe[src*=/player/], iframe[src*=/sources]")
         val videoList = mutableListOf<Video>()
 
-        if (playerElements.isNotEmpty()) {
-            playerElements.forEach { iframe ->
-                val srcUrl = iframe.attr("abs:src")
-                videoList.addAll(extractDirectVideosFromPlayer(srcUrl))
-            }
-        } else {
-            // Fallback scraping alternative match configuration inside inline scripts
-            val scripts = document.select("script").html()
-            if (scripts.contains("video_sources")) {
-                videoList.addAll(parseInlineJsonSources(scripts))
-            }
-        }
-        
-        return videoList
-    }
+        // Step 1: Just like AnimeBlkom parses the embedding server links, we find the iframes on the watch page
+        val playerElements = document.select("iframe[src*=/player/], iframe[src*=/sources], iframe[src*=vid3rb]")
 
-    private fun extractDirectVideosFromPlayer(playerUrl: String): List<Video> {
-        val videoList = mutableListOf<Video>()
-        try {
-            val playerHeaders = headersBuilder()
-                .add("Referer", baseUrl)
-                .build()
+        playerElements.forEach { iframe ->
+            try {
+                val playerUrl = iframe.attr("abs:src")
                 
-            val response = client.newCall(GET(playerUrl, playerHeaders)).execute()
-            val html = response.body.string()
-            
-            if (html.contains("video_sources")) {
-                videoList.addAll(parseInlineJsonSources(html))
-            }
-        } catch (_: Exception) {}
+                // Step 2: Make the server call synchronously using OkHttp client
+                val playerHeaders = headersBuilder()
+                    .add("Referer", "$baseUrl/")
+                    .build()
+                
+                val playerResponse = client.newCall(GET(playerUrl, playerHeaders)).execute()
+                val playerHtml = playerResponse.body.string()
+
+                // Step 3: Match the global JavaScript object configuration variable containing direct streams
+                videoList.addAll(extractSourcesFromScript(playerHtml))
+            } catch (_: Exception) {}
+        }
+
+        // Step 4: Fallback mechanism in case the script block was printed straight to the core watch document context
+        if (videoList.isEmpty()) {
+            videoList.addAll(extractSourcesFromScript(document.select("script").html()))
+        }
+
         return videoList
     }
 
-    private fun parseInlineJsonSources(html: String): List<Video> {
-        val videoList = mutableListOf<Video>()
+    private fun extractSourcesFromScript(html: String): List<Video> {
+        val videos = mutableListOf<Video>()
         try {
-            val jsonPattern = """var\s+video_sources\s*=\s*(\[[^;]+]);""".toRegex()
-            val match = jsonPattern.find(html)
+            // This Regex securely isolates the JSON initialization array used by Vid3rb servers
+            val jsonRegex = """var\s+video_sources\s*=\s*(\[[^;]+]);""".toRegex()
+            val match = jsonRegex.find(html)
+            
             if (match != null) {
-                val jsonStr = match.groupValues[1]
-                val jsonArray = JSONArray(jsonStr)
+                val jsonArray = JSONArray(match.groupValues[1])
                 for (i in 0 until jsonArray.length()) {
                     val item = jsonArray.getJSONObject(i)
                     val src = if (item.has("src")) item.getString("src") else item.getString("file")
                     val label = if (item.has("label")) item.getString("label") else "Direct Server"
                     
                     if (src.isNotBlank()) {
-                        // Matching the explicit download link configurations provided 
+                        // Crucial: Set the strict Origin Referer token parameters required by files.vid3rb.com
                         val videoHeaders = headersBuilder()
                             .set("Referer", "https://video.vid3rb.com/")
                             .build()
-                        videoList.add(Video(src, "Anim3rb - $label", src, videoHeaders))
+                            
+                        videos.add(Video(src, "Anim3rb - $label", src, videoHeaders))
                     }
                 }
             }
         } catch (_: Exception) {}
-        return videoList
+        return videos
     }
 
     override fun videoListSelector(): String = throw UnsupportedOperationException()
